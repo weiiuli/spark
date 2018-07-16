@@ -152,6 +152,7 @@ private[spark] class BasicExecutorFeatureStep(
         .build()
     }.getOrElse(executorContainer)
     val driverPod = kubernetesConf.roleSpecificConf.driverPod
+    val isHostnetworkEnabled = kubernetesConf.get(KUBERNETES_HOSTNETWORK_SUPPORT)
     val executorPod = new PodBuilder(pod.pod)
       .editOrNewMetadata()
         .withName(name)
@@ -171,6 +172,7 @@ private[spark] class BasicExecutorFeatureStep(
         .withRestartPolicy("Never")
         .withNodeSelector(kubernetesConf.nodeSelector().asJava)
         .addToImagePullSecrets(kubernetesConf.imagePullSecrets(): _*)
+        .withHostNetwork(isHostnetworkEnabled)
         .endSpec()
       .build()
 

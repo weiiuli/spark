@@ -23,6 +23,11 @@ import org.apache.spark.internal.config.ConfigBuilder
 
 private[spark] object Config extends Logging {
 
+  private[spark] val KUBERNETES_HOSTNETWORK_SUPPORT =
+    ConfigBuilder("spark.kubernetes.hostnetwork.enabled")
+      .doc("Specify whether executor pod enables hostnetwork feature")
+      .booleanConf
+      .createWithDefault(false)
   val KUBERNETES_NAMESPACE =
     ConfigBuilder("spark.kubernetes.namespace")
       .doc("The namespace that will be used for running the driver and executor pods.")

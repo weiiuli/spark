@@ -90,7 +90,7 @@ private[spark] class BasicDriverFeatureStep(
         .addToLimits("memory", driverMemoryQuantity)
         .endResources()
       .build()
-
+    val isHostnetworkEnabled = conf.get(KUBERNETES_HOSTNETWORK_SUPPORT)
     val driverPod = new PodBuilder(pod.pod)
       .editOrNewMetadata()
         .withName(driverPodName)
@@ -101,6 +101,8 @@ private[spark] class BasicDriverFeatureStep(
         .withRestartPolicy("Never")
         .withNodeSelector(conf.nodeSelector().asJava)
         .addToImagePullSecrets(conf.imagePullSecrets(): _*)
+        .withHostNetwork(isHostnetworkEnabled)
+
         .endSpec()
       .build()
 
