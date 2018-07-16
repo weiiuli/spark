@@ -66,7 +66,8 @@ private[spark] class BasicExecutorFeatureStep(
     } else {
       executorCores.toString
     }
-  private val executorLimitCores = kubernetesConf.get(KUBERNETES_EXECUTOR_LIMIT_CORES)
+  private val executorLimitCoresFactor = kubernetesConf.sparkConf.getDouble("spark.kubernetes.executor.limit.cores.factor", 1d)
+  private val executorLimitCores = executorLimitCoresFactor * executorCores
 
   override def configurePod(pod: SparkPod): SparkPod = {
     val name = s"$executorPodNamePrefix-exec-${kubernetesConf.roleSpecificConf.executorId}"
@@ -79,7 +80,7 @@ private[spark] class BasicExecutorFeatureStep(
       .withAmount(s"${executorMemoryWithOverhead}Mi")
       .build()
     val executorCpuQuantity = new QuantityBuilder(false)
-      .withAmount(executorCoresRequest)
+      .withAmount(executorLimitCores.toString)
       .build()
     val executorExtraClasspathEnv = executorExtraClasspath.map { cp =>
       new EnvVarBuilder()
@@ -136,21 +137,13 @@ private[spark] class BasicExecutorFeatureStep(
         .addToRequests("memory", executorMemoryQuantity)
         .addToLimits("memory", executorMemoryQuantity)
         .addToRequests("cpu", executorCpuQuantity)
+        .addToLimits("cpu", executorCpuQuantity)
         .endResources()
       .addAllToEnv(executorEnv.asJava)
       .withPorts(requiredPorts.asJava)
       .addToArgs("executor")
       .build()
-    val containerWithLimitCores = executorLimitCores.map { limitCores =>
-      val executorCpuLimitQuantity = new QuantityBuilder(false)
-        .withAmount(limitCores)
-        .build()
-      new ContainerBuilder(executorContainer)
-        .editResources()
-          .addToLimits("cpu", executorCpuLimitQuantity)
-          .endResources()
-        .build()
-    }.getOrElse(executorContainer)
+
     val driverPod = kubernetesConf.roleSpecificConf.driverPod
     val isHostnetworkEnabled = kubernetesConf.get(KUBERNETES_HOSTNETWORK_SUPPORT)
     val executorPod = new PodBuilder(pod.pod)
@@ -176,7 +169,7 @@ private[spark] class BasicExecutorFeatureStep(
         .endSpec()
       .build()
 
-    SparkPod(executorPod, containerWithLimitCores)
+    SparkPod(executorPod, executorContainer)
   }
 
   override def getAdditionalPodSystemProperties(): Map[String, String] = Map.empty
