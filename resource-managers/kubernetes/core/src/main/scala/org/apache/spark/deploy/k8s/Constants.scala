@@ -72,7 +72,7 @@ private[spark] object Constants {
   val ENV_PYSPARK_MAJOR_PYTHON_VERSION = "PYSPARK_MAJOR_PYTHON_VERSION"
 
   // Miscellaneous
-  val KUBERNETES_MASTER_INTERNAL_URL = "https://kubernetes.default.svc"
+  val KUBERNETES_MASTER_INTERNAL_URL = "https://kubernetes.default.svc.bcc-ht0.jd.local"
   val DRIVER_CONTAINER_NAME = "spark-kubernetes-driver"
   val MEMORY_OVERHEAD_MIN_MIB = 384L
 }

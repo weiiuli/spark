@@ -58,7 +58,7 @@ private[spark] class DriverServiceFeatureStep(
   override def configurePod(pod: SparkPod): SparkPod = pod
 
   override def getAdditionalPodSystemProperties(): Map[String, String] = {
-    val driverHostname = s"$resolvedServiceName.${kubernetesConf.namespace()}.svc"
+    val driverHostname = s"$resolvedServiceName.${kubernetesConf.namespace()}.svc.bcc-ht0.jd.local"
     Map(DRIVER_HOST_KEY -> driverHostname,
       "spark.driver.port" -> driverPort.toString,
       org.apache.spark.internal.config.DRIVER_BLOCK_MANAGER_PORT.key ->
