@@ -450,6 +450,7 @@ class SparkContext(config: SparkConf) extends Logging {
     // Bind the UI before starting the task scheduler to communicate
     // the bound port to the cluster manager properly
     _ui.foreach(_.bind())
+    _conf.set("spark.ui.bound.port", _ui.get.boundPort.toString)
 
     _hadoopConfiguration = SparkHadoopUtil.get.newConfiguration(_conf)
 

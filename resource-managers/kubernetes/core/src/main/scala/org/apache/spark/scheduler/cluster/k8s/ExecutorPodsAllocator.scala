@@ -18,24 +18,66 @@ package org.apache.spark.scheduler.cluster.k8s
 
 import java.util.concurrent.atomic.{AtomicInteger, AtomicLong}
 
-import io.fabric8.kubernetes.api.model.PodBuilder
-import io.fabric8.kubernetes.client.KubernetesClient
-import scala.collection.mutable
+import io.fabric8.kubernetes.api.model.{Pod, PodBuilder}
+import io.fabric8.kubernetes.client.{Config, KubernetesClient}
 
+import scala.collection.mutable
 import org.apache.spark.{SparkConf, SparkException}
 import org.apache.spark.deploy.k8s.Config._
 import org.apache.spark.deploy.k8s.Constants._
 import org.apache.spark.deploy.k8s.KubernetesConf
 import org.apache.spark.internal.Logging
 import org.apache.spark.util.{Clock, Utils}
-
+trait SchedulerBackendSpecificHandlers {
+  def getDriverPod(): Pod
+  def getKubernetesDriverPodName(conf: SparkConf): String
+}
 private[spark] class ExecutorPodsAllocator(
     conf: SparkConf,
     executorBuilder: KubernetesExecutorBuilder,
     kubernetesClient: KubernetesClient,
     snapshotsStore: ExecutorPodsSnapshotsStore,
-    clock: Clock) extends Logging {
+    clock: Clock) extends Logging with SchedulerBackendSpecificHandlers{
 
+  private val kubernetesNamespace = conf.get(KUBERNETES_NAMESPACE)
+  val modeHandler: SchedulerBackendSpecificHandlers = {
+    val deployMode = conf
+      .get("spark.submit.deployMode")
+    deployMode match {
+      case "client" => {
+        new java.io.File(Config.KUBERNETES_SERVICE_ACCOUNT_TOKEN_PATH).exists() match{
+        case true => new NonOutClusterClientModeHandlers()
+        case false => new OutClusterClientModeHandlers()
+      }
+    }
+    case _ => new NonOutClusterClientModeHandlers()
+  }
+}
+class OutClusterClientModeHandlers extends SchedulerBackendSpecificHandlers {
+  override def getDriverPod(): Pod = null
+
+  override def getKubernetesDriverPodName(conf: SparkConf): String = null
+}
+
+class NonOutClusterClientModeHandlers extends SchedulerBackendSpecificHandlers {
+  override def getDriverPod(): Pod = {
+    try {
+      kubernetesClient.pods().inNamespace(kubernetesNamespace).
+        withName(kubernetesDriverPodName).get()
+    } catch {
+      case throwable: Throwable =>
+        logError(s"Executor cannot find driver pod.", throwable)
+        throw new SparkException(s"Executor cannot find driver pod", throwable)
+    }
+  }
+
+  override def getKubernetesDriverPodName(conf: SparkConf): String = {
+    conf
+      .get(KUBERNETES_DRIVER_POD_NAME)
+      .getOrElse(
+        throw new SparkException("Must specify the driver pod name"))
+  }
+}
   private val EXECUTOR_ID_COUNTER = new AtomicLong(0L)
 
   private val totalExpectedExecutors = new AtomicInteger(0)
@@ -46,13 +88,8 @@ private[spark] class ExecutorPodsAllocator(
 
   private val podCreationTimeout = math.max(podAllocationDelay * 5, 60000)
 
-  private val kubernetesDriverPodName = conf
-    .get(KUBERNETES_DRIVER_POD_NAME)
-    .getOrElse(throw new SparkException("Must specify the driver pod name"))
+  private val kubernetesDriverPodName = modeHandler.getKubernetesDriverPodName(conf)
 
-  private val driverPod = kubernetesClient.pods()
-    .withName(kubernetesDriverPodName)
-    .get()
 
   // Executor IDs that have been requested from Kubernetes but have not been detected in any
   // snapshot yet. Mapped to the timestamp when they were created.
@@ -118,11 +155,12 @@ private[spark] class ExecutorPodsAllocator(
         logInfo(s"Going to request $numExecutorsToAllocate executors from Kubernetes.")
         for ( _ <- 0 until numExecutorsToAllocate) {
           val newExecutorId = EXECUTOR_ID_COUNTER.incrementAndGet()
+          logInfo( s"--------------executorPodFactory.createExecutorPod")
           val executorConf = KubernetesConf.createExecutorConf(
             conf,
             newExecutorId.toString,
             applicationId,
-            driverPod)
+            getDriverPod())
           val executorPod = executorBuilder.buildFromFeatures(executorConf)
           val podWithAttachedContainer = new PodBuilder(executorPod.pod)
             .editOrNewSpec()
@@ -146,4 +184,9 @@ private[spark] class ExecutorPodsAllocator(
       }
     }
   }
+  override def getDriverPod(): Pod = modeHandler.getDriverPod()
+
+  override def getKubernetesDriverPodName(conf: SparkConf): String = getKubernetesDriverPodName(conf)
+
+
 }

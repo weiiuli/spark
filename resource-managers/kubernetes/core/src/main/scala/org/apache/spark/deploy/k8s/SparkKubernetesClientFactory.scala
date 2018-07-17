@@ -20,12 +20,12 @@ import java.io.File
 
 import com.google.common.base.Charsets
 import com.google.common.io.Files
-import io.fabric8.kubernetes.client.{ConfigBuilder, DefaultKubernetesClient, KubernetesClient}
+import io.fabric8.kubernetes.client.{Config, ConfigBuilder, DefaultKubernetesClient, KubernetesClient}
 import io.fabric8.kubernetes.client.utils.HttpClientUtils
 import okhttp3.Dispatcher
-
 import org.apache.spark.SparkConf
 import org.apache.spark.deploy.k8s.Config._
+import org.apache.spark.deploy.k8s.SparkKubernetesClientFactory.{createInClusterKubernetesClient, createOutClusterKubernetesClient}
 import org.apache.spark.util.ThreadUtils
 
 /**
@@ -34,8 +34,31 @@ import org.apache.spark.util.ThreadUtils
  * options for different components.
  */
 private[spark] object SparkKubernetesClientFactory {
-
   def createKubernetesClient(
+                              master: String,
+                              namespace: Option[String],
+                              kubernetesAuthConfPrefix: String,
+                              sparkConf: SparkConf,
+                              maybeServiceAccountToken: Option[File],
+                              maybeServiceAccountCaCert: Option[File]): KubernetesClient = {
+    new java.io.File(io.fabric8.kubernetes.client.Config.KUBERNETES_SERVICE_ACCOUNT_TOKEN_PATH).exists() match {
+      case true => createInClusterKubernetesClient(
+        master,
+        namespace,
+        kubernetesAuthConfPrefix,
+        sparkConf,
+        maybeServiceAccountToken,
+        maybeServiceAccountCaCert)
+      case false => createOutClusterKubernetesClient(
+        master,
+        namespace,
+        kubernetesAuthConfPrefix,
+        sparkConf,
+        maybeServiceAccountToken,
+        maybeServiceAccountCaCert)
+    }
+  }
+  def createInClusterKubernetesClient(
       master: String,
       namespace: Option[String],
       kubernetesAuthConfPrefix: String,
@@ -87,6 +110,59 @@ private[spark] object SparkKubernetesClientFactory {
       .build()
     new DefaultKubernetesClient(httpClientWithCustomDispatcher, config)
   }
+  def createOutClusterKubernetesClient(
+                                       master: String,
+                                       namespace: Option[String],
+                                       kubernetesAuthConfPrefix: String,
+                                       sparkConf: SparkConf,
+                                       defaultServiceAccountToken: Option[File],
+                                       defaultServiceAccountCaCert: Option[File]): KubernetesClient = {
+    val oauthTokenFileConf = s"$kubernetesAuthConfPrefix.$OAUTH_TOKEN_FILE_CONF_SUFFIX"
+    val oauthTokenConf = s"$kubernetesAuthConfPrefix.$OAUTH_TOKEN_CONF_SUFFIX"
+    val oauthTokenFile = sparkConf.getOption(oauthTokenFileConf)
+      .map(new File(_))
+      .orElse(defaultServiceAccountToken)
+    val oauthTokenValue = sparkConf.getOption(oauthTokenConf)
+    KubernetesUtils.requireNandDefined(
+      oauthTokenFile,
+      oauthTokenValue,
+      s"Cannot specify OAuth token through both a file $oauthTokenFileConf and a " +
+        s"value $oauthTokenConf.")
+
+    val caCertFile = sparkConf
+      .getOption(s"$kubernetesAuthConfPrefix.$CA_CERT_FILE_CONF_SUFFIX")
+      .orElse(defaultServiceAccountCaCert.map(_.getAbsolutePath))
+    val clientKeyFile = sparkConf
+      .getOption(s"$kubernetesAuthConfPrefix.$CLIENT_KEY_FILE_CONF_SUFFIX")
+    val clientCertFile = sparkConf
+      .getOption(s"$kubernetesAuthConfPrefix.$CLIENT_CERT_FILE_CONF_SUFFIX")
+    val dispatcher = new Dispatcher(
+      ThreadUtils.newDaemonCachedThreadPool("kubernetes-dispatcher"))
+    val config = new ConfigBuilder()
+      .withApiVersion("v1")
+      .withMasterUrl(master)
+      .withWebsocketPingInterval(0)
+      .withOption(oauthTokenValue) {
+        (token, configBuilder) => configBuilder.withOauthToken(token)
+//      }.withOption(oauthTokenFile) {
+//      (file, configBuilder) =>
+//        configBuilder.withOauthToken(Files.toString(file, Charsets.UTF_8))
+    }.withOption(caCertFile) {
+      (file, configBuilder) => configBuilder.withCaCertFile(file)
+    }.withOption(clientKeyFile) {
+      (file, configBuilder) => configBuilder.withClientKeyFile(file)
+    }.withOption(clientCertFile) {
+      (file, configBuilder) => configBuilder.withClientCertFile(file)
+    }.withOption(namespace) {
+      (ns, configBuilder) => configBuilder.withNamespace(ns)
+    }.build()
+    val baseHttpClient = HttpClientUtils.createHttpClient(config)
+    val httpClientWithCustomDispatcher = baseHttpClient.newBuilder()
+      .dispatcher(dispatcher)
+      .build()
+    new DefaultKubernetesClient(httpClientWithCustomDispatcher, config)
+  }
+
 
   private implicit class OptionConfigurableConfigBuilder(val configBuilder: ConfigBuilder)
     extends AnyVal {
@@ -98,5 +174,6 @@ private[spark] object SparkKubernetesClientFactory {
         configurator(opt, configBuilder)
       }.getOrElse(configBuilder)
     }
+    def build(): Config = configBuilder.build()
   }
 }

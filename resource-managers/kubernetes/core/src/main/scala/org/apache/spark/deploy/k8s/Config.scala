@@ -23,6 +23,12 @@ import org.apache.spark.internal.config.ConfigBuilder
 
 private[spark] object Config extends Logging {
 
+  private[spark] val KUBERNETES_SPARK_LOCAL_DIRS =
+    ConfigBuilder("spark.kubernetes.local.dirs")
+      .doc("spark local dirs for executor")
+      .stringConf
+      .createWithDefault("/data0/spark-on-k8s-shuffle,/data1/spark-on-k8s-shuffle,/data2/spark-on-k8s-shuffle,/data3/spark-on-k8s-shuffle,/data4/spark-on-k8s-shuffle," +
+        "/data5/spark-on-k8s-shuffle,/data6/spark-on-k8s-shuffle,/data7/spark-on-k8s-shuffle,/data8/spark-on-k8s-shuffle")
   private[spark] val KUBERNETES_HOSTNETWORK_SUPPORT =
     ConfigBuilder("spark.kubernetes.hostnetwork.enabled")
       .doc("Specify whether executor pod enables hostnetwork feature")

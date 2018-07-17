@@ -49,6 +49,7 @@ private[spark] object Constants {
   val BLOCK_MANAGER_PORT_NAME = "blockmanager"
 
   // Environment Variables
+  val SPARK_LOCAL_DIRS = "SPARK_LOCAL_DIRS"
   val ENV_DRIVER_URL = "SPARK_DRIVER_URL"
   val ENV_EXECUTOR_CORES = "SPARK_EXECUTOR_CORES"
   val ENV_EXECUTOR_MEMORY = "SPARK_EXECUTOR_MEMORY"

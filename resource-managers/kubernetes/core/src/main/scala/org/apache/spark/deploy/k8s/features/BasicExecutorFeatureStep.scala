@@ -146,19 +146,11 @@ private[spark] class BasicExecutorFeatureStep(
 
     val driverPod = kubernetesConf.roleSpecificConf.driverPod
     val isHostnetworkEnabled = kubernetesConf.get(KUBERNETES_HOSTNETWORK_SUPPORT)
-    val executorPod = new PodBuilder(pod.pod)
+    var executorPod = new PodBuilder(pod.pod)
       .editOrNewMetadata()
         .withName(name)
         .withLabels(kubernetesConf.roleLabels.asJava)
         .withAnnotations(kubernetesConf.roleAnnotations.asJava)
-        .withOwnerReferences()
-        .addNewOwnerReference()
-          .withController(true)
-          .withApiVersion(driverPod.getApiVersion)
-          .withKind(driverPod.getKind)
-          .withName(driverPod.getMetadata.getName)
-          .withUid(driverPod.getMetadata.getUid)
-          .endOwnerReference()
         .endMetadata()
       .editOrNewSpec()
         .withHostname(hostname)
@@ -168,6 +160,19 @@ private[spark] class BasicExecutorFeatureStep(
         .withHostNetwork(isHostnetworkEnabled)
         .endSpec()
       .build()
+    if (driverPod != null) {
+      executorPod = new PodBuilder(executorPod)
+        .editMetadata()
+        .withOwnerReferences()
+        .addNewOwnerReference()
+        .withController(true)
+        .withApiVersion(driverPod.getApiVersion)
+        .withKind(driverPod.getKind)
+        .withName(driverPod.getMetadata.getName)
+        .withUid(driverPod.getMetadata.getUid)
+        .endOwnerReference()
+        .endMetadata().build()
+    }
 
     SparkPod(executorPod, executorContainer)
   }
