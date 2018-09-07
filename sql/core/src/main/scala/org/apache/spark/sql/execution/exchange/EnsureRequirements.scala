@@ -36,14 +36,31 @@ import org.apache.spark.sql.internal.SQLConf
  * the input partition ordering requirements are met.
  */
 case class EnsureRequirements(conf: SQLConf) extends Rule[SparkPlan] {
-  private def defaultNumPreShufflePartitions: Int =
+  private def defaultNumPreShufflePartitions(plan: SparkPlan): Int =
     if (conf.adaptiveExecutionEnabled) {
-      conf.maxNumPostShufflePartitions
+      if (conf.adaptiveAutoCalculateInitialPartitionNum) {
+        autoCalculateInitialPartitionNum(plan)
+      } else {
+        conf.maxNumPostShufflePartitions
+      }
     } else {
       conf.numShufflePartitions
     }
 
-  private def ensureDistributionAndOrdering(operator: SparkPlan): SparkPlan = {
+  private def autoCalculateInitialPartitionNum(plan: SparkPlan): Int = {
+    val totalInputFileSize = plan.collectLeaves().map(_.stats.sizeInBytes).sum
+    val autoInitialPartitionsNum = Math.ceil(
+      totalInputFileSize.toLong * 1.0 / conf.targetPostShuffleInputSize).toInt
+    if (autoInitialPartitionsNum < conf.minNumPostShufflePartitions) {
+      conf.minNumPostShufflePartitions
+    } else if (autoInitialPartitionsNum > conf.maxNumPostShufflePartitions) {
+      conf.maxNumPostShufflePartitions
+    } else {
+      autoInitialPartitionsNum
+    }
+  }
+
+  private def ensureDistributionAndOrdering(operator: SparkPlan, rootNode: SparkPlan): SparkPlan = {
     val requiredChildDistributions: Seq[Distribution] = operator.requiredChildDistribution
     val requiredChildOrderings: Seq[Seq[SortOrder]] = operator.requiredChildOrdering
     var children: Seq[SparkPlan] = operator.children
@@ -58,7 +75,7 @@ case class EnsureRequirements(conf: SQLConf) extends Rule[SparkPlan] {
         BroadcastExchangeExec(mode, child)
       case (child, distribution) =>
         val numPartitions = distribution.requiredNumPartitions
-          .getOrElse(defaultNumPreShufflePartitions)
+          .getOrElse(defaultNumPreShufflePartitions(rootNode))
         ShuffleExchangeExec(distribution.createPartitioning(numPartitions), child)
     }
 
@@ -196,14 +213,19 @@ case class EnsureRequirements(conf: SQLConf) extends Rule[SparkPlan] {
     }
   }
 
-  def apply(plan: SparkPlan): SparkPlan = plan.transformUp {
-    // TODO: remove this after we create a physical operator for `RepartitionByExpression`.
-    case operator @ ShuffleExchangeExec(upper: HashPartitioning, child) =>
-      child.outputPartitioning match {
-        case lower: HashPartitioning if upper.semanticEquals(lower) => child
-        case _ => operator
-      }
-    case operator: SparkPlan =>
-      ensureDistributionAndOrdering(reorderJoinPredicates(operator))
+  def apply(plan: SparkPlan): SparkPlan = {
+    // Record the rootNode is order to collect all the leaves node of the rootNode
+    // when calculate the initial partition num
+    val rootNode = plan;
+    plan.transformUp {
+      // TODO: remove this after we create a physical operator for `RepartitionByExpression`.
+      case operator @ ShuffleExchangeExec(upper: HashPartitioning, child) =>
+        child.outputPartitioning match {
+          case lower: HashPartitioning if upper.semanticEquals(lower) => child
+          case _ => operator
+        }
+      case operator: SparkPlan =>
+        ensureDistributionAndOrdering(reorderJoinPredicates(operator), rootNode)
+    }
   }
 }

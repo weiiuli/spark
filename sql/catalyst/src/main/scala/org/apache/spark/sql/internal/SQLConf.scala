@@ -304,6 +304,14 @@ object SQLConf {
         "must be a positive integer.")
       .createWithDefault(500)
 
+  val ADAPTIVE_EXECUTION_AUTO_CALCULATE_INITIAL_PARTITION_NUM =
+    buildConf("spark.sql.adaptive.autoCalculateInitialPartitionNum")
+      .doc("When true and adaptive execution is enabled," +
+        " spark will calculate the initial partition number" +
+        " based on the statistics of the needed column.")
+      .booleanConf
+      .createWithDefault(false)
+
   val SUBEXPRESSION_ELIMINATION_ENABLED =
     buildConf("spark.sql.subexpressionElimination.enabled")
       .internal()
@@ -1381,6 +1389,9 @@ class SQLConf extends Serializable with Logging {
   def minNumPostShufflePartitions: Int = getConf(SHUFFLE_MIN_NUM_POSTSHUFFLE_PARTITIONS)
 
   def maxNumPostShufflePartitions: Int = getConf(SHUFFLE_MAX_NUM_POSTSHUFFLE_PARTITIONS)
+
+  def adaptiveAutoCalculateInitialPartitionNum: Boolean =
+    getConf(ADAPTIVE_EXECUTION_AUTO_CALCULATE_INITIAL_PARTITION_NUM)
 
   def minBatchesToRetain: Int = getConf(MIN_BATCHES_TO_RETAIN)
 
