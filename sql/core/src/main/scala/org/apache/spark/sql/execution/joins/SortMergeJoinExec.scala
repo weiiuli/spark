@@ -70,15 +70,27 @@ case class SortMergeJoinExec(
     // For left and right outer joins, the output is partitioned by the streamed input's join keys.
     case LeftOuter => left.outputPartitioning
     case RightOuter => right.outputPartitioning
-    case FullOuter => UnknownPartitioning(left.outputPartitioning.numPartitions)
+    case FullOuter =>
+      // The output of Full Outer Join is similar to pure HashPartioning, except for NULL, which
+      // is the only key not co-partitioned
+      (left.outputPartitioning, right.outputPartitioning) match {
+        case (l: HashPartitioning, r: HashPartitioning) =>
+          PartitioningCollection(Seq(l.copy(exceptNull = true), r.copy(exceptNull = true)))
+        case _ => UnknownPartitioning(left.outputPartitioning.numPartitions)
+      }
     case LeftExistence(_) => left.outputPartitioning
     case x =>
       throw new IllegalArgumentException(
         s"${getClass.getSimpleName} should not take $x as the JoinType")
   }
 
-  override def requiredChildDistribution: Seq[Distribution] =
-    HashClusteredDistribution(leftKeys) :: HashClusteredDistribution(rightKeys) :: Nil
+  override def requiredChildDistribution: Seq[Distribution] = joinType match {
+    case Inner | LeftOuter | RightOuter | FullOuter =>
+      HashClusteredDistribution(leftKeys, exceptNull = true) ::
+        HashClusteredDistribution(rightKeys, exceptNull = true) :: Nil
+    case _ => HashClusteredDistribution(leftKeys) :: HashClusteredDistribution(rightKeys) :: Nil
+  }
+
 
   override def outputOrdering: Seq[SortOrder] = joinType match {
     // For inner join, orders of both sides keys should be kept.

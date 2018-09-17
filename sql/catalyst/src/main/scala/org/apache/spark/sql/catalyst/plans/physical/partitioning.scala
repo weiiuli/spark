@@ -92,8 +92,13 @@ case class ClusteredDistribution(
 }
 
 /**
- * Represents data where tuples have been clustered according to the hash of the given
- * `expressions`. The hash function is defined as `HashPartitioning.partitionIdExpression`, so only
+ * If exceptNull == false: Represents data where tuples have been clustered according to the hash of
+ * the given `expressions`.
+ * If exceptNull == true: Represents data where tuples have been clustered according to the hash of
+ * the given `expressions` except NULL, it means NULL can distribute in any partitions. This is
+ * often used in conditions of Join, where NULL's distribution is not cared about due to NULL will
+ * be considered not equal to any value
+ * The hash function is defined as `HashPartitioning.partitionIdExpression`, so only
  * [[HashPartitioning]] can satisfy this distribution.
  *
  * This is a strictly stronger guarantee than [[ClusteredDistribution]]. Given a tuple and the
@@ -101,7 +106,8 @@ case class ClusteredDistribution(
  */
 case class HashClusteredDistribution(
     expressions: Seq[Expression],
-    requiredNumPartitions: Option[Int] = None) extends Distribution {
+    requiredNumPartitions: Option[Int] = None,
+    exceptNull: Boolean = false) extends Distribution {
   require(
     expressions != Nil,
     "The expressions for hash of a HashClusteredDistribution should not be Nil. " +
@@ -112,7 +118,7 @@ case class HashClusteredDistribution(
     assert(requiredNumPartitions.isEmpty || requiredNumPartitions.get == numPartitions,
       s"This HashClusteredDistribution requires ${requiredNumPartitions.get} partitions, but " +
         s"the actual number of partitions is $numPartitions.")
-    HashPartitioning(expressions, numPartitions)
+    HashPartitioning(expressions, numPartitions, exceptNull)
   }
 }
 
@@ -207,12 +213,16 @@ case object SinglePartition extends Partitioning {
 }
 
 /**
- * Represents a partitioning where rows are split up across partitions based on the hash
- * of `expressions`.  All rows where `expressions` evaluate to the same values are guaranteed to be
+ * If exceptNull == false: Represents a partitioning where rows are split up across partitions based
+ * on the hash of `expressions`.
+ * If exceptNull == true: Represents a partitioning where rows are split up across partitions based
+ * on the hash of `expressions` except null, which is the only key not co-partitioned.
+ * All rows where `expressions` evaluate to the same values are guaranteed to be
  * in the same partition.
  */
-case class HashPartitioning(expressions: Seq[Expression], numPartitions: Int)
-  extends Expression with Partitioning with Unevaluable {
+case class HashPartitioning(
+    expressions: Seq[Expression], numPartitions: Int, exceptNull: Boolean = false)
+    extends Expression with Partitioning with Unevaluable {
 
   override def children: Seq[Expression] = expressions
   override def nullable: Boolean = false
@@ -222,8 +232,9 @@ case class HashPartitioning(expressions: Seq[Expression], numPartitions: Int)
     super.satisfies0(required) || {
       required match {
         case h: HashClusteredDistribution =>
-          expressions.length == h.expressions.length && expressions.zip(h.expressions).forall {
-            case (l, r) => l.semanticEquals(r)
+          expressions.length == h.expressions.length && (h.exceptNull || !exceptNull) &&
+            expressions.zip(h.expressions).forall {
+              case (l, r) => l.semanticEquals(r)
           }
         case ClusteredDistribution(requiredClustering, _) =>
           expressions.forall(x => requiredClustering.exists(_.semanticEquals(x)))
