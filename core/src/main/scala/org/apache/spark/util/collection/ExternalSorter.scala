@@ -22,14 +22,12 @@ import java.util.Comparator
 
 import scala.collection.mutable
 import scala.collection.mutable.ArrayBuffer
-
 import com.google.common.io.ByteStreams
-
 import org.apache.spark._
 import org.apache.spark.executor.ShuffleWriteMetrics
 import org.apache.spark.internal.Logging
 import org.apache.spark.serializer._
-import org.apache.spark.storage.{BlockId, DiskBlockObjectWriter}
+import org.apache.spark.storage.{BlockId, DiskBlockObjectWriter, NetBlockObjectWriter}
 
 /**
  * Sorts and potentially merges a number of key-value pairs of type (K, V) to produce key-combiner
@@ -788,6 +786,8 @@ private[spark] class ExternalSorter[K, V, C](
             writer.write(cur._1._2, cur._2)
             cur = if (upstream.hasNext) upstream.next() else null
           }
+
+          def writeRemoteNext(writer: NetBlockObjectWriter): Unit = throw new UnsupportedOperationException()
 
           def hasNext(): Boolean = cur != null
 

@@ -19,7 +19,7 @@ package org.apache.spark.util.collection
 
 import java.util.Comparator
 
-import org.apache.spark.storage.DiskBlockObjectWriter
+import org.apache.spark.storage.{DiskBlockObjectWriter, NetBlockObjectWriter}
 
 /**
  * A common interface for size-tracking collections of key-value pairs that
@@ -53,6 +53,11 @@ private[spark] trait WritablePartitionedPairCollection[K, V] {
       private[this] var cur = if (it.hasNext) it.next() else null
 
       def writeNext(writer: DiskBlockObjectWriter): Unit = {
+        writer.write(cur._1._2, cur._2)
+        cur = if (it.hasNext) it.next() else null
+      }
+
+      def writeRemoteNext(writer: NetBlockObjectWriter): Unit = {
         writer.write(cur._1._2, cur._2)
         cur = if (it.hasNext) it.next() else null
       }
@@ -97,6 +102,8 @@ private[spark] object WritablePartitionedPairCollection {
  */
 private[spark] trait WritablePartitionedIterator {
   def writeNext(writer: DiskBlockObjectWriter): Unit
+
+  def writeRemoteNext(writer: NetBlockObjectWriter): Unit
 
   def hasNext(): Boolean
 
