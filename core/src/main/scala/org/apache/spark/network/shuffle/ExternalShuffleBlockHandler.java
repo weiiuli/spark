@@ -19,6 +19,7 @@ package org.apache.spark.network.shuffle;
 
 import com.codahale.metrics.*;
 import com.google.common.annotations.VisibleForTesting;
+import io.netty.buffer.*;
 import org.apache.spark.network.buffer.ManagedBuffer;
 import org.apache.spark.network.client.RpcResponseCallback;
 import org.apache.spark.network.client.TransportClient;
@@ -28,16 +29,18 @@ import org.apache.spark.network.server.StreamManager;
 import org.apache.spark.network.shuffle.ExternalShuffleBlockResolver.AppExecId;
 import org.apache.spark.network.shuffle.protocol.*;
 import org.apache.spark.network.util.TransportConf;
+import org.apache.spark.util.Utils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.io.File;
-import java.io.IOException;
+import java.io.*;
 import java.nio.ByteBuffer;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.Map;
 
+import static org.apache.spark.network.util.NettyUtils.createPooledByteBufAllocator;
 import static org.apache.spark.network.util.NettyUtils.getRemoteAddress;
 
 /**
@@ -74,7 +77,141 @@ public class ExternalShuffleBlockHandler extends RpcHandler {
   @Override
   public void receive(TransportClient client, ByteBuffer message, RpcResponseCallback callback) {
     BlockTransferMessage msgObj = BlockTransferMessage.Decoder.fromByteBuffer(message);
-    handleMessage(msgObj, client, callback);
+    if (msgObj instanceof UploadBlockData) {
+      UploadBlockData msg = (UploadBlockData) msgObj;
+      handleUploadBlockData(message, msg, client, callback);
+
+    } else if (msgObj instanceof  UploadBlockIndex ) {
+      UploadBlockIndex msg = (UploadBlockIndex) msgObj;
+      handleUploadBlockIndex(message, msg, client, callback);
+    } else {
+      handleMessage(msgObj, client, callback);
+    }
+  }
+
+  protected void handleUploadBlockData(
+          ByteBuffer body,
+          UploadBlockData msg,
+          TransportClient client,
+          RpcResponseCallback callback) {
+      try{
+          System.out.format("handleUploadBlockData thread-id:%s appid:%s execId:%s blockId:%s offset:%s length:%s %s\n",
+                  Thread.currentThread().getId(),
+                  msg.appId,
+                  msg.execId,
+                  msg.blockId,
+                  msg.offset,
+                  msg.length,
+                  msg.length == (body.capacity() - msg.encodedLength() - 1)
+          );
+          checkAuth(client, msg.appId);
+          ExecutorShuffleInfo execInfo = blockManager.executors.get(new AppExecId(msg.appId, msg.execId));
+          File outputFile;
+          File outputDataFile = ExternalShuffleUtils.getFile(execInfo, msg.blockId + ".data");
+          String  tmpPath = outputDataFile.getAbsolutePath()+"0";
+          if (msg.flag == MessageEnum.SHUFFLE) {
+              outputFile = new File(tmpPath);
+          } else {
+              outputFile =  ExternalShuffleUtils.getFile(execInfo, msg.blockId + "_" + msg.flag);
+          }
+
+          byte[] array = null;
+          if (!body.hasArray()) {
+              System.out.format("!body.hasArray() \n");
+              ByteBuf bodybuf = Unpooled.wrappedBuffer(body);
+              int length = bodybuf.readableBytes();
+              array = new byte[length];
+              bodybuf.getBytes(bodybuf.readerIndex(), array);
+          }else {
+              array = body.array();
+              System.out.format("body.hasArray() \n");
+          }
+
+          RandomAccessFile raf = new RandomAccessFile(outputFile, "rw");
+          raf.seek(msg.offset);
+          raf.write(array, msg.encodedLength() + 1, msg.length);
+          raf.close();
+          callback.onSuccess(ByteBuffer.wrap(new byte[0]));
+
+      } catch (Exception e) {
+          e.printStackTrace();
+          callback.onFailure(e);
+      }
+  }
+
+  protected void handleUploadBlockIndex(
+          ByteBuffer body,
+          UploadBlockIndex msg,
+          TransportClient client,
+          RpcResponseCallback callback) {
+    try {
+        checkAuth(client, msg.appId);
+        ExecutorShuffleInfo execInfo = blockManager.executors.get(new AppExecId(msg.appId, msg.execId));
+        String appExecIdBlockID = ExternalShuffleUtils.getAppExecIdBlockID(msg);
+        ByteBuf bodybuf = Unpooled.wrappedBuffer(body);
+        bodybuf.readerIndex(msg.encodedLength() + 1);
+
+        int numPartitions = msg.length / 8;
+        long[] lengths = new long[numPartitions];
+        for (int i = 0; i < numPartitions; i ++) {
+            lengths[i++] = bodybuf.readLong();
+        }
+        File outputDataFile = ExternalShuffleUtils.getFile(execInfo, msg.blockId + ".data");
+        File spillfile;
+        if (msg.flag == MessageEnum.SHUFFLE) {
+            String tmpPath = outputDataFile.getAbsolutePath() + "0";
+            spillfile = new File(tmpPath);
+        } else {
+            spillfile = ExternalShuffleUtils.getFile(execInfo, msg.blockId + "_" + msg.flag);
+        }
+        SpillInfo spillInfo = new SpillInfo(numPartitions, spillfile, lengths);
+
+        blockManager.updateShuffleindexs(appExecIdBlockID, spillInfo, msg.flag);
+
+        // merge spill
+        if (msg.flag == MessageEnum.SHUFFLE) {
+            File outputIndexFile = ExternalShuffleUtils.getFile(execInfo, msg.blockId + ".index");
+            Map<Integer, SpillInfo> map = blockManager.shuffleindexs.get(appExecIdBlockID);
+            int numFiles = map.keySet().size();
+            SpillInfo[] spillInfos = new SpillInfo[numFiles];
+
+            for (Map.Entry<Integer, SpillInfo> e : map.entrySet()) {
+                spillInfos[e.getKey()] = e.getValue();
+            }
+            System.out.format("--------------numFiles--------------:%s \n", numFiles);
+
+            File tmp = Utils.tempFileWith(outputDataFile);
+
+            long statTime = System.currentTimeMillis();
+
+            long [] partitionLengths = ExternalShuffleUtils.mergeSpills(spillInfos, tmp, numPartitions);
+
+            System.out.format("create data used time--------------:%s \n", System.currentTimeMillis() - statTime);
+            statTime = System.currentTimeMillis();
+
+            blockManager.writeIndexFileAndCommit(outputIndexFile, outputDataFile, tmp, partitionLengths);
+            System.out.format("create index used time--------------:%s\n\"index--------------partitionLengths:%s\\", System.currentTimeMillis() - statTime, Arrays.toString(partitionLengths));
+            ByteArrayOutputStream buf = blockManager.getByteArrayOutputStream(lengths);
+            System.out.format("handleUploadBlockIndex thread-id:%s appid:%s execId:%s blockId:%s length:%s\noutputDataFile:%s\noutputIndexFile:%s\n",
+                    Thread.currentThread().getId(),
+                    msg.appId,
+                    msg.execId,
+                    msg.blockId,
+                    msg.length,
+                    outputDataFile.getAbsolutePath(),
+                    outputIndexFile.getAbsolutePath()
+
+            );
+            callback.onSuccess(ByteBuffer.wrap(buf.toByteArray()));
+        } else {
+
+            callback.onSuccess(ByteBuffer.wrap(new byte[0]));
+        }
+    } catch (Exception e) {
+        e.printStackTrace();
+        callback.onFailure(e);
+    }
+
   }
 
   protected void handleMessage(
@@ -84,6 +221,7 @@ public class ExternalShuffleBlockHandler extends RpcHandler {
     if (msgObj instanceof OpenBlocks) {
       final Timer.Context responseDelayContext = metrics.openBlockRequestLatencyMillis.time();
       try {
+        System.out.format("OpenBlocks thread-id:%s\n", Thread.currentThread().getId());
         OpenBlocks msg = (OpenBlocks) msgObj;
         checkAuth(client, msg.appId);
         long streamId = streamManager.registerStream(client.getClientId(),
@@ -104,6 +242,7 @@ public class ExternalShuffleBlockHandler extends RpcHandler {
       final Timer.Context responseDelayContext =
         metrics.registerExecutorRequestLatencyMillis.time();
       try {
+        System.out.format("Reister thread-id:%s\n", Thread.currentThread().getId());
         RegisterExecutor msg = (RegisterExecutor) msgObj;
         checkAuth(client, msg.appId);
         blockManager.registerExecutor(msg.appId, msg.execId, msg.executorInfo);
@@ -119,6 +258,10 @@ public class ExternalShuffleBlockHandler extends RpcHandler {
 
   public MetricSet getAllMetrics() {
     return metrics;
+  }
+  public class MessageEnum {
+
+    public static final int SHUFFLE = 0;
   }
 
   @Override

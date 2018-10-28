@@ -27,6 +27,8 @@ import com.google.common.cache.CacheLoader;
 import com.google.common.cache.LoadingCache;
 import com.google.common.cache.Weigher;
 import com.google.common.collect.Maps;
+import com.google.common.io.Closeables;
+import org.apache.spark.io.NioBufferedFileInputStream;
 import org.apache.spark.network.buffer.FileSegmentManagedBuffer;
 import org.apache.spark.network.buffer.ManagedBuffer;
 import org.apache.spark.network.shuffle.protocol.ExecutorShuffleInfo;
@@ -35,22 +37,16 @@ import org.apache.spark.network.util.LevelDBProvider;
 import org.apache.spark.network.util.LevelDBProvider.StoreVersion;
 import org.apache.spark.network.util.NettyUtils;
 import org.apache.spark.network.util.TransportConf;
+import org.apache.spark.util.Utils;
 import org.iq80.leveldb.DB;
 import org.iq80.leveldb.DBIterator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.io.File;
-import java.io.IOException;
+import java.io.*;
 import java.nio.charset.StandardCharsets;
-import java.util.Arrays;
-import java.util.Iterator;
-import java.util.List;
-import java.util.Map;
-import java.util.concurrent.ConcurrentMap;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.Executor;
-import java.util.concurrent.Executors;
+import java.util.*;
+import java.util.concurrent.*;
 
 /**
  * Manages converting shuffle BlockIds into physical segments of local files, from a process outside
@@ -73,6 +69,7 @@ public class ExternalShuffleBlockResolver {
   @VisibleForTesting
   final ConcurrentMap<AppExecId, ExecutorShuffleInfo> executors;
 
+  final ConcurrentMap<String, Map<Integer,SpillInfo>> shuffleindexs;
   /**
    *  Caches index file information so that we can avoid open/close the index files
    *  for each block fetch.
@@ -90,6 +87,7 @@ public class ExternalShuffleBlockResolver {
   final DB db;
 
   private final List<String> knownManagers = Arrays.asList(
+    "org.apache.spark.shuffle.remote.RemoteShuffleManager",
     "org.apache.spark.shuffle.sort.SortShuffleManager",
     "org.apache.spark.shuffle.unsafe.UnsafeShuffleManager");
 
@@ -130,13 +128,191 @@ public class ExternalShuffleBlockResolver {
       executors = Maps.newConcurrentMap();
     }
     this.directoryCleaner = directoryCleaner;
+    shuffleindexs =new ConcurrentHashMap<>();
   }
 
   public int getRegisteredExecutorsSize() {
     return executors.size();
   }
 
-  /** Registers a new Executor with all the configuration we need to find its shuffle files. */
+  public static ByteArrayOutputStream getByteArrayOutputStream (long[] lengths) {
+    ByteArrayOutputStream buf = new ByteArrayOutputStream((lengths.length) * 8);
+    DataOutputStream out = new DataOutputStream(new BufferedOutputStream(buf));
+    try {
+      // We take in lengths of each block, need to convert it to offsets.
+      long offset = 0L;
+      for (long length : lengths) {
+        offset = length;
+        out.writeLong(offset);
+      }
+      out.flush();
+      out.close();
+    } catch (Exception e) {
+      logger.error("Exception while beginning uploadBlock", e);
+    }
+    return buf;
+  }
+  synchronized void updateShuffleindexs(String appExecIdBlockID,SpillInfo spillInfo,int flag)
+  {
+    if (shuffleindexs.get(appExecIdBlockID) != null && !shuffleindexs.get(appExecIdBlockID).isEmpty()) {
+      Map<Integer, SpillInfo> oldvalue = shuffleindexs.get(appExecIdBlockID);
+      if(oldvalue.keySet().equals(flag))
+      {
+        logger.info("shuffleindexs: key update ");
+      }
+      Map<Integer, SpillInfo> newvalue = oldvalue;
+      newvalue.put(flag, spillInfo);
+      shuffleindexs.replace(appExecIdBlockID, oldvalue, newvalue);
+    } else {
+      Map<Integer, SpillInfo> shuffleindex = new HashMap<>();
+      shuffleindex.put(flag, spillInfo);
+      shuffleindexs.put(appExecIdBlockID, shuffleindex);
+    }
+  }
+
+  /**
+   * Concatenate all of the per-partition files into a single combined file.
+   *
+   * @return array of lengths, in bytes, of each partition of the file (used by map output tracker).
+   */
+  public static long[] writePartitionedFile(File outputFile, File[] inputFile, int numPartitions) throws IOException {
+    // Track location of the partition starts in the output file
+    final long[] lengths = new long[numPartitions];
+    if (numPartitions == 0) {
+      // We were passed an empty iterator
+      return lengths;
+    }
+    final FileOutputStream out = new FileOutputStream(outputFile, true);
+    final long writeStartTime = System.nanoTime();
+    boolean threwException = true;
+    try {
+      for (int i = 0; i < numPartitions; i++) {
+        final File file = inputFile[i];
+        if (file.exists()) {
+          final FileInputStream in = new FileInputStream(file);
+          boolean copyThrewException = true;
+          try {
+            lengths[i] = Utils.copyStream(in, out, false, true);
+            copyThrewException = false;
+          } finally {
+            Closeables.close(in, copyThrewException);
+          }
+          if (!file.delete()) {
+            logger.error("Unable to delete file for partition {}", i);
+          }
+        }
+      }
+      threwException = false;
+    } finally {
+      Closeables.close(out, threwException);
+      logger.info("Time used by Combining data file :", System.nanoTime() - writeStartTime);
+    }
+    return lengths;
+  }
+  /**
+   * Check whether the given index and data files match each other.
+   * If so, return the partition lengths in the data file. Otherwise return null.
+   */
+  public static long[] checkIndexAndDataFile(File index, File data, int blocks) {
+    // the index file should have `block + 1` longs as offset.
+    if (index.length() != (blocks + 1) * 8L) {
+      return null;
+    }
+    long[] lengths = new long[blocks];
+    // Read the lengths of blocks
+    DataInputStream in = null;
+    try {
+      in = new DataInputStream(new NioBufferedFileInputStream(index));
+      // Convert the offsets into lengths of each block
+      long offset = in.readLong();
+      if (offset != 0L) {
+        return null;
+      }
+      int i = 0;
+      while (i < blocks) {
+        long off = in.readLong();
+        lengths[i] = off - offset;
+        offset = off;
+        i += 1;
+      }
+      in.close();
+    } catch (Exception e) {
+      e.printStackTrace();
+      return null;
+    } finally {
+    }
+    long sum = 0;
+    int i = 0;
+    while (i < lengths.length) {
+      sum += lengths[i];
+    }
+    // the size of data file should match with index file
+    if (data.length() == sum) {
+      return lengths;
+    } else {
+      return null;
+    }
+  }
+  /**
+   * writeIndexFileAndCommit
+   */
+  public synchronized void writeIndexFileAndCommit(File indexFile, File dataFile, File dataTmp, long[] lengths) {
+    File indexTmp = Utils.tempFileWith(indexFile);
+    try {
+      DataOutputStream out = new DataOutputStream(new BufferedOutputStream(new FileOutputStream(indexTmp)));
+      try {
+        // We take in lengths of each block, need to convert it to offsets.
+        long offset = 0L;
+        out.writeLong(offset);
+        for (long length : lengths) {
+          offset += length;
+          out.writeLong(offset);
+        }
+        out.close();
+        // There is only one IndexShuffleBlockResolver per executor, this synchronization make sure
+        // the following check and rename are atomic.
+        long[] existingLengths = checkIndexAndDataFile(indexFile, dataFile, lengths.length);
+        if (existingLengths != null) {
+          // Another attempt for the same task has already written our map outputs successfully,
+          // so just use the existing partition lengths and delete our temporary map outputs.
+          System.arraycopy(existingLengths, 0, lengths, 0, lengths.length);
+          if (dataTmp != null && dataTmp.exists()) {
+            dataTmp.delete();
+          }
+          indexTmp.delete();
+        } else {
+          // This is the first successful attempt in writing the map outputs for this task,
+          // so override any existing index and data files with the ones we wrote.
+          if (indexFile.exists()) {
+            indexFile.delete();
+          }
+          if (dataFile.exists()) {
+            dataFile.delete();
+          }
+          if (!indexTmp.renameTo(indexFile)) {
+            throw new IOException("fail to rename file " + indexTmp + " to " + indexFile);
+          }
+          if (dataTmp != null && dataTmp.exists() && !dataTmp.renameTo(dataFile)) {
+            throw new IOException("fail to rename file " + dataTmp + " to " + dataFile);
+          }
+        }
+      } catch (Exception e) {
+        e.printStackTrace();
+
+      }
+    } catch (FileNotFoundException e) {
+      e.printStackTrace();
+
+    } finally {
+      if (indexTmp.exists() && !indexTmp.delete()) {
+        logger.error("Failed to delete temporary index file at ${indexTmp.getAbsolutePath}");
+      }
+    }
+  }
+
+
+
+    /** Registers a new Executor with all the configuration we need to find its shuffle files. */
   public void registerExecutor(
       String appId,
       String execId,
@@ -259,10 +435,18 @@ public class ExternalShuffleBlockResolver {
    */
   @VisibleForTesting
   static File getFile(String[] localDirs, int subDirsPerLocalDir, String filename) {
+    // Figure out which local directory it hashes to, and which subdirectory in that
     int hash = JavaUtils.nonNegativeHash(filename);
-    String localDir = localDirs[hash % localDirs.length];
+    int dirId = hash % localDirs.length;
     int subDirId = (hash / localDirs.length) % subDirsPerLocalDir;
-    return new File(new File(localDir, String.format("%02x", subDirId)), filename);
+
+    // Create the subdirectory if it doesn't already exist
+    File newDir = new File(localDirs[dirId], String.format("%02x", subDirId));
+    if (!newDir.exists() && !newDir.mkdir()) {
+      logger.error("Failed to create local dir in $newDir");
+    }
+
+    return new File(newDir, filename);
   }
 
   void close() {
@@ -274,7 +458,6 @@ public class ExternalShuffleBlockResolver {
       }
     }
   }
-
   /** Simply encodes an executor's full ID, which is appId + execId. */
   public static class AppExecId {
     public final String appId;
