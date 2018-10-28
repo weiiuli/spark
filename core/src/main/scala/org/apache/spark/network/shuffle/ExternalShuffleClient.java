@@ -22,7 +22,15 @@ import java.nio.ByteBuffer;
 import java.util.List;
 
 import com.codahale.metrics.MetricSet;
+import com.google.common.base.Throwables;
 import com.google.common.collect.Lists;
+import com.google.common.util.concurrent.SettableFuture;
+import io.netty.buffer.ByteBuf;
+import io.netty.buffer.CompositeByteBuf;
+import io.netty.buffer.PooledByteBufAllocator;
+import io.netty.buffer.Unpooled;
+import org.apache.spark.network.client.RpcResponseCallback;
+import org.apache.spark.network.shuffle.protocol.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -33,8 +41,6 @@ import org.apache.spark.network.client.TransportClientFactory;
 import org.apache.spark.network.crypto.AuthClientBootstrap;
 import org.apache.spark.network.sasl.SecretKeyHolder;
 import org.apache.spark.network.server.NoOpRpcHandler;
-import org.apache.spark.network.shuffle.protocol.ExecutorShuffleInfo;
-import org.apache.spark.network.shuffle.protocol.RegisterExecutor;
 import org.apache.spark.network.util.TransportConf;
 
 /**
@@ -117,6 +123,68 @@ public class ExternalShuffleClient extends ShuffleClient {
       }
     }
   }
+
+  public SettableFuture<ByteBuffer> uploadBlockData(
+          String host,
+          int port,
+          String execId,
+          String blockIdName,
+          int flag,
+          int length,
+          long offset,
+          ByteBuf blockData) {
+    checkInit();
+    try {
+      SettableFuture<ByteBuffer> result = SettableFuture.create();
+      TransportClient client = clientFactory.createClient(host, port);
+      CompositeByteBuf msg = PooledByteBufAllocator.DEFAULT.compositeDirectBuffer();
+      msg.addComponents(true, Unpooled.wrappedBuffer(new UploadBlockData(appId, execId, blockIdName, flag, length, offset).toByteBuffer()), blockData);
+
+      System.out.format("uploadData channelId:%s\tclientId:%s\tlen:%s\n", client.getChannel().id().asLongText(), client.getClientId(), blockData);
+      client.sendRpc(msg,
+              new RpcResponseCallback() {
+                @Override
+                public void onSuccess(ByteBuffer response) {
+                  ByteBuffer copy = ByteBuffer.allocate(response.remaining());
+                  copy.put(response);
+                  // flip "copy" to make it readable
+                  copy.flip();
+                  result.set(copy);
+                }
+                @Override
+                public void onFailure(Throwable e) {
+                  result.setException(e);
+                }
+              });
+      return result;
+    } catch (Exception e) {
+      logger.error("Exception while beginning uploadBlock", e);
+      throw Throwables.propagate(e);
+    }
+  }
+
+  public ByteBuffer uploadBlockIndex(
+          String host,
+          int port,
+          String execId,
+          String blockIdName,
+          int flag,
+          int length,
+          ByteBuf offsets) {
+    checkInit();
+    try {
+      TransportClient client = clientFactory.createClient(host, port);
+      CompositeByteBuf msg = PooledByteBufAllocator.DEFAULT.compositeDirectBuffer();
+      msg.addComponents(true, Unpooled.wrappedBuffer(new UploadBlockIndex(appId, execId, blockIdName, flag, length).toByteBuffer()), offsets);
+
+      System.out.format("fetchBlockIndex channelId:%s\tclientId:%s\n", client.getChannel().id().asLongText(), client.getClientId());
+      return client.sendRpcSync(msg, 30*1000);
+    } catch (Exception e) {
+      logger.error("Exception while beginning uploadBlock", e);
+      throw Throwables.propagate(e);
+    }
+  }
+
 
   @Override
   public MetricSet shuffleMetrics() {

@@ -31,7 +31,9 @@ import com.google.common.base.Objects;
 import com.google.common.base.Preconditions;
 import com.google.common.base.Throwables;
 import com.google.common.util.concurrent.SettableFuture;
+import io.netty.buffer.ByteBuf;
 import io.netty.channel.Channel;
+import org.apache.spark.network.buffer.NettyManagedBuffer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -244,11 +246,73 @@ public class TransportClient implements Closeable {
     return requestId;
   }
 
+  public long sendRpc(ByteBuf message, RpcResponseCallback callback) {
+    long startTime = System.currentTimeMillis();
+    if (logger.isTraceEnabled()) {
+      logger.trace("Sending RPC to {}", getRemoteAddress(channel));
+    }
+
+    long requestId = Math.abs(UUID.randomUUID().getLeastSignificantBits());
+    handler.addRpcRequest(requestId, callback);
+
+    channel.writeAndFlush(new RpcRequest(requestId, new NettyManagedBuffer(message)))
+            .addListener(future -> {
+              if (future.isSuccess()) {
+                long timeTaken = System.currentTimeMillis() - startTime;
+                if (logger.isTraceEnabled()) {
+                  logger.trace("Sending request {} to {} took {} ms", requestId,
+                          getRemoteAddress(channel), timeTaken);
+                }
+              } else {
+                String errorMsg = String.format("Failed to send RPC %s to %s: %s", requestId,
+                        getRemoteAddress(channel), future.cause());
+                logger.error(errorMsg, future.cause());
+                handler.removeRpcRequest(requestId);
+                channel.close();
+                try {
+                  callback.onFailure(new IOException(errorMsg, future.cause()));
+                } catch (Exception e) {
+                  logger.error("Uncaught exception in RPC response callback handler!", e);
+                }
+              }
+            });
+
+    return requestId;
+  }
+
   /**
    * Synchronously sends an opaque message to the RpcHandler on the server-side, waiting for up to
    * a specified timeout for a response.
    */
   public ByteBuffer sendRpcSync(ByteBuffer message, long timeoutMs) {
+    final SettableFuture<ByteBuffer> result = SettableFuture.create();
+
+    sendRpc(message, new RpcResponseCallback() {
+      @Override
+      public void onSuccess(ByteBuffer response) {
+        ByteBuffer copy = ByteBuffer.allocate(response.remaining());
+        copy.put(response);
+        // flip "copy" to make it readable
+        copy.flip();
+        result.set(copy);
+      }
+
+      @Override
+      public void onFailure(Throwable e) {
+        result.setException(e);
+      }
+    });
+
+    try {
+      return result.get(timeoutMs, TimeUnit.MILLISECONDS);
+    } catch (ExecutionException e) {
+      throw Throwables.propagate(e.getCause());
+    } catch (Exception e) {
+      throw Throwables.propagate(e);
+    }
+  }
+
+  public ByteBuffer sendRpcSync(ByteBuf message, long timeoutMs) {
     final SettableFuture<ByteBuffer> result = SettableFuture.create();
 
     sendRpc(message, new RpcResponseCallback() {
