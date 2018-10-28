@@ -315,6 +315,7 @@ object SparkEnv extends Logging {
 
     // Let the user specify short names for shuffle managers
     val shortShuffleMgrNames = Map(
+      "remote" -> classOf[org.apache.spark.shuffle.remote.RemoteShuffleManager].getName,
       "sort" -> classOf[org.apache.spark.shuffle.sort.SortShuffleManager].getName,
       "tungsten-sort" -> classOf[org.apache.spark.shuffle.sort.SortShuffleManager].getName)
     val shuffleMgrName = conf.get("spark.shuffle.manager", "sort")
