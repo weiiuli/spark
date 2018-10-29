@@ -68,8 +68,8 @@ public class ExternalShuffleBlockResolver {
   // Map containing all registered executors' metadata.
   @VisibleForTesting
   final ConcurrentMap<AppExecId, ExecutorShuffleInfo> executors;
-
-  final ConcurrentMap<String, Map<Integer,SpillInfo>> shuffleindexs;
+  //todo to be fixed
+  final ConcurrentMap<String, ConcurrentMap<Integer,SpillInfo>> shuffleindexs;
   /**
    *  Caches index file information so that we can avoid open/close the index files
    *  for each block fetch.
@@ -152,21 +152,15 @@ public class ExternalShuffleBlockResolver {
     }
     return buf;
   }
-  synchronized void updateShuffleindexs(String appExecIdBlockID,SpillInfo spillInfo,int flag)
-  {
-    if (shuffleindexs.get(appExecIdBlockID) != null && !shuffleindexs.get(appExecIdBlockID).isEmpty()) {
-      Map<Integer, SpillInfo> oldvalue = shuffleindexs.get(appExecIdBlockID);
-      if(oldvalue.keySet().equals(flag))
-      {
-        logger.info("shuffleindexs: key update ");
-      }
-      Map<Integer, SpillInfo> newvalue = oldvalue;
-      newvalue.put(flag, spillInfo);
-      shuffleindexs.replace(appExecIdBlockID, oldvalue, newvalue);
+
+  void updateShuffleindexs(String appExecIdBlockID, SpillInfo spillInfo, int flag) {
+    ConcurrentMap<Integer, SpillInfo> spillInfoMap = shuffleindexs.get(appExecIdBlockID);
+    if (spillInfoMap != null && !spillInfoMap.isEmpty()) {
+      spillInfoMap.put(flag, spillInfo);
     } else {
-      Map<Integer, SpillInfo> shuffleindex = new HashMap<>();
-      shuffleindex.put(flag, spillInfo);
-      shuffleindexs.put(appExecIdBlockID, shuffleindex);
+      ConcurrentMap<Integer, SpillInfo> map = new ConcurrentHashMap<>();
+      map.put(flag, spillInfo);
+      shuffleindexs.put(appExecIdBlockID, map);
     }
   }
 
