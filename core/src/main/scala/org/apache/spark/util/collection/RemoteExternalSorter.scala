@@ -19,7 +19,7 @@ package org.apache.spark.util.collection
 
 import java.io._
 import java.nio.ByteBuffer
-import java.util.Comparator
+import java.util.{Comparator, UUID}
 import java.util.concurrent.TimeUnit
 
 import com.google.common.io.ByteStreams
@@ -153,7 +153,9 @@ private[spark] class RemoteExternalSorter[K, V, C](
 
   private val spills = new ArrayBuffer[SpilledInfo]
 
-  private var rs = new ArrayBuffer[SettableFuture[ByteBuffer]]
+  private var settableFutureResults = new ArrayBuffer[SettableFuture[ByteBuffer]]
+
+  private val taskUUID = UUID.randomUUID().toString
 
   /**
     * Number of files this sorter has spilled so far.
@@ -222,7 +224,7 @@ private[spark] class RemoteExternalSorter[K, V, C](
    */
   override protected[this] def spill(collection: WritablePartitionedPairCollection[K, C]): Unit = {
     val writer = new NetBlockObjectWriter(blockManager, serializerManager, serInstance, fileBufferSize, false,
-      context.taskMetrics().shuffleWriteMetrics, numPartitions, spills.length + 1, rs, blockId)
+      context.taskMetrics().shuffleWriteMetrics, numPartitions, spills.length + 1, settableFutureResults, taskUUID, conf.getInt("spark.shuffle.remote.write.timeout", 30 * 1000), blockId)
     val it = collection.destructiveSortedWritablePartitionedIterator(comparator)
     while (it.hasNext) {
       val partitionId = it.nextPartition()
@@ -247,7 +249,7 @@ private[spark] class RemoteExternalSorter[K, V, C](
    */
   def remoteWritePartitioned(): Array[Long] = {
     val writer = new NetBlockObjectWriter(blockManager, serializerManager, serInstance, fileBufferSize, false,
-      context.taskMetrics().shuffleWriteMetrics, numPartitions, 0, rs, blockId)
+      context.taskMetrics().shuffleWriteMetrics, numPartitions, 0, settableFutureResults, taskUUID, conf.getInt("spark.shuffle.remote.write.timeout", 30 * 1000), blockId)
     val collection = if (aggregator.isDefined) map else buffer
     val it = collection.destructiveSortedWritablePartitionedIterator(comparator)
     while (it.hasNext) {
@@ -258,17 +260,13 @@ private[spark] class RemoteExternalSorter[K, V, C](
       writer.recordParition(partitionId)
     }
 
-    val lengths = writer.commitAndGet()
+    val partitionLengths = writer.commitAndGet()
     writer.close()
-    
-    System.out.println("#### start wait")
-    rs.map(ret => ret.get(60, TimeUnit.SECONDS))
-    System.out.println("#### end wait")
 
     if (!spills.isEmpty) {
       for (spillInfo <- spills) {
         for (i <- 0 until numPartitions) {
-          lengths(i) += spillInfo.lengths(i)
+          partitionLengths(i) += spillInfo.lengths(i)
         }
       }
     }
@@ -277,7 +275,7 @@ private[spark] class RemoteExternalSorter[K, V, C](
     context.taskMetrics().incDiskBytesSpilled(diskBytesSpilled)
     context.taskMetrics().incPeakExecutionMemory(peakMemoryUsedBytes)
 
-    lengths
+    partitionLengths
   }
 
   def stop(): Unit = {
