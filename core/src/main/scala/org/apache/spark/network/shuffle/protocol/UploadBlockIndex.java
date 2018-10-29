@@ -28,6 +28,7 @@ public class UploadBlockIndex extends BlockTransferMessage {
   public final String blockId;
   public final int flag;
   public final int length;
+  public final int numPartition;
 
 
   public UploadBlockIndex(
@@ -35,19 +36,21 @@ public class UploadBlockIndex extends BlockTransferMessage {
       String execId,
       String blockId,
       int flag,
-      int length) {
+      int length,
+      int numPartition) {
     this.appId = appId;
     this.execId = execId;
     this.blockId = blockId;
     this.flag = flag;
     this.length = length;
+    this.numPartition = numPartition;
   }
 
   @Override
   protected Type type() { return Type.UPLOAD_BLOCK_INDEX; }
 
   @Override
-  public int hashCode() { return Objects.hashCode(appId, execId, blockId, flag, length); }
+  public int hashCode() { return Objects.hashCode(appId, execId, blockId, flag, length, numPartition); }
 
   @Override
   public String toString() {
@@ -57,6 +60,7 @@ public class UploadBlockIndex extends BlockTransferMessage {
       .add("blockId", blockId)
       .add("flag", flag)
       .add("length", length)
+      .add("numPartition", numPartition)
       .toString();
   }
 
@@ -68,7 +72,8 @@ public class UploadBlockIndex extends BlockTransferMessage {
         && Objects.equal(execId, o.execId)
         && Objects.equal(blockId, o.blockId)
         && Objects.equal(flag, o.flag)
-        && Objects.equal(length, o.length);
+        && Objects.equal(length, o.length)
+        && Objects.equal(numPartition, o.numPartition);
     }
     return false;
   }
@@ -78,7 +83,7 @@ public class UploadBlockIndex extends BlockTransferMessage {
     return Encoders.Strings.encodedLength(appId)
       + Encoders.Strings.encodedLength(execId)
       + Encoders.Strings.encodedLength(blockId)
-      + 4 + 4;
+      + 4 + 4 + 4;
   }
 
   @Override
@@ -88,6 +93,7 @@ public class UploadBlockIndex extends BlockTransferMessage {
     Encoders.Strings.encode(buf, blockId);
     buf.writeInt(flag);
     buf.writeInt(length);
+    buf.writeInt(numPartition);
   }
 
   public static UploadBlockIndex decode(ByteBuf buf) {
@@ -96,6 +102,7 @@ public class UploadBlockIndex extends BlockTransferMessage {
     String blockId = Encoders.Strings.decode(buf);
     int flag = buf.readInt();
     int length = buf.readInt();
-    return new UploadBlockIndex(appId, execId, blockId, flag, length);
+    int numPartition = buf.readInt();
+    return new UploadBlockIndex(appId, execId, blockId, flag, length, numPartition);
   }
 }
