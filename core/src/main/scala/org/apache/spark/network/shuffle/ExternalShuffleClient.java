@@ -170,15 +170,17 @@ public class ExternalShuffleClient extends ShuffleClient {
           String blockIdName,
           int flag,
           int length,
-          ByteBuf offsets) {
+          int numPartition,
+          ByteBuf offsets,
+          int timeoutMs) {
     checkInit();
     try {
       TransportClient client = clientFactory.createClient(host, port);
       CompositeByteBuf msg = PooledByteBufAllocator.DEFAULT.compositeDirectBuffer();
-      msg.addComponents(true, Unpooled.wrappedBuffer(new UploadBlockIndex(appId, execId, blockIdName, flag, length).toByteBuffer()), offsets);
+      msg.addComponents(true, Unpooled.wrappedBuffer(new UploadBlockIndex(appId, execId, blockIdName, flag, length, numPartition).toByteBuffer()), offsets);
 
       System.out.format("fetchBlockIndex channelId:%s\tclientId:%s\n", client.getChannel().id().asLongText(), client.getClientId());
-      return client.sendRpcSync(msg, 30*1000);
+      return client.sendRpcSync(msg, timeoutMs);
     } catch (Exception e) {
       logger.error("Exception while beginning uploadBlock", e);
       throw Throwables.propagate(e);
