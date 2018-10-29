@@ -19,7 +19,7 @@ package org.apache.spark.storage
 
 import java.io._
 import java.nio.ByteBuffer
-import java.util.Date
+import java.util.concurrent.TimeUnit
 
 import com.google.common.util.concurrent.SettableFuture
 import io.netty.buffer.{ByteBuf, ByteBufOutputStream, PooledByteBufAllocator}
@@ -27,7 +27,7 @@ import org.apache.spark.executor.ShuffleWriteMetrics
 import org.apache.spark.internal.Logging
 import org.apache.spark.network.shuffle.ExternalShuffleClient
 import org.apache.spark.serializer.{SerializationStream, SerializerInstance, SerializerManager}
-import org.apache.spark.util.{ByteBufferOutputStream, Utils}
+import org.apache.spark.util.Utils
 
 import scala.collection.mutable.ArrayBuffer
 
@@ -53,6 +53,8 @@ private[spark] class NetBlockObjectWriter(
     numPartitions: Int,
     flag: Int,
     results: ArrayBuffer[SettableFuture[ByteBuffer]],
+    taskUUID: String,
+    timeoutMs: Int,
     val blockId: BlockId = null)
   extends OutputStream
   with Logging {
@@ -63,7 +65,7 @@ private[spark] class NetBlockObjectWriter(
   private var streamOpen = false
   private var hasBeenClosed = false
 
-  private var lengths: Array[Long] = null
+  private var paritionLengths: Array[Long] = null
   private var lastPosition: Long = 0
 
   private var committedPosition = 0
@@ -77,7 +79,7 @@ private[spark] class NetBlockObjectWriter(
   private var numRecordsWritten = 0
 
   private def initialize(): Unit = {
-    lengths = new Array[Long](numPartitions)
+    paritionLengths = new Array[Long](numPartitions)
   }
 
   def open(): NetBlockObjectWriter = {
@@ -110,7 +112,7 @@ private[spark] class NetBlockObjectWriter(
         streamOpen = false
         hasBeenClosed = true
 
-        lengths = null
+        paritionLengths = null
         lastPosition = 0
         committedPosition = 0
         reportedPosition = 0
@@ -141,25 +143,31 @@ private[spark] class NetBlockObjectWriter(
     flushAndCommit()
 
     if (initialized) {
+      if(syncWrites || 0 == flag) {
+        results.map(ret => ret.get(timeoutMs, TimeUnit.MILLISECONDS))
+      }
+
       var buffer: ByteBuf = null
       buffer = PooledByteBufAllocator.DEFAULT.directBuffer(8 * numPartitions)
       //val out = new DataOutputStream(new ByteBufOutputStream(buffer))
-      for (length <- lengths) {
+      for (length <- paritionLengths) {
         buffer.writeLong(length)
       }
 
-      blockManager.shuffleClient.asInstanceOf[ExternalShuffleClient].uploadBlockIndex(
+      val result = blockManager.shuffleClient.asInstanceOf[ExternalShuffleClient].uploadBlockIndex(
         blockManager.shuffleServerId.host,
         blockManager.shuffleServerId.port,
         blockManager.shuffleServerId.executorId,
-        blockId.name,
+        blockId.name + "_" + taskUUID,
         flag,
         buffer.readableBytes(),
-        buffer
+        numPartitions,
+        buffer,
+        timeoutMs
       )
     }
 
-    lengths
+    paritionLengths
   }
 
   def flushAndCommit() {
@@ -174,7 +182,7 @@ private[spark] class NetBlockObjectWriter(
         blockManager.shuffleServerId.host,
         blockManager.shuffleServerId.port,
         blockManager.shuffleServerId.executorId,
-        blockId.name,
+        blockId.name + "_" + taskUUID,
         flag,
         buf.readableBytes(),
         committedPosition,
@@ -198,7 +206,7 @@ private[spark] class NetBlockObjectWriter(
     objOut.flush()
     val curPosition = buf.readableBytes() + committedPosition
 
-    lengths(paritionId) = curPosition - lastPosition
+    paritionLengths(paritionId) = curPosition - lastPosition
     lastPosition = curPosition
   }
 
@@ -213,10 +221,10 @@ private[spark] class NetBlockObjectWriter(
     objOut.writeKey(key)
     objOut.writeValue(value)
     recordWritten()
-    flushBuffer()
+    isFlushBuffer()
   }
 
-  def flushBuffer(){
+  def isFlushBuffer(){
     if (buf.readableBytes() >= bufferSize) {
       flushAndCommit()
     }
