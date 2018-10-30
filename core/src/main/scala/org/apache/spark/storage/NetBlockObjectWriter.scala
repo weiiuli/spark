@@ -144,16 +144,18 @@ private[spark] class NetBlockObjectWriter(
 
     if (initialized) {
       if(syncWrites || 0 == flag) {
-        results.map(ret => ret.get(timeoutMs, TimeUnit.MILLISECONDS))
+        val statTime = System.currentTimeMillis
+        results.foreach(ret => ret.get(timeoutMs, TimeUnit.MILLISECONDS))
+        logInfo(s"Received all responses for UploadBlockData, time: ${System.currentTimeMillis - statTime} ms")
       }
 
       var buffer: ByteBuf = null
       buffer = PooledByteBufAllocator.DEFAULT.directBuffer(8 * numPartitions)
-      //val out = new DataOutputStream(new ByteBufOutputStream(buffer))
       for (length <- paritionLengths) {
         buffer.writeLong(length)
       }
 
+      val statTime = System.currentTimeMillis
       val result = blockManager.shuffleClient.asInstanceOf[ExternalShuffleClient].uploadBlockIndex(
         blockManager.shuffleServerId.host,
         blockManager.shuffleServerId.port,
@@ -165,9 +167,12 @@ private[spark] class NetBlockObjectWriter(
         buffer,
         timeoutMs
       )
-    }
+      logInfo(s"Received response for UploadBlockIndex, flag: $flag time: ${System.currentTimeMillis - statTime} ms")
 
-    paritionLengths
+      paritionLengths
+    } else {
+      new Array[Long](numPartitions)
+    }
   }
 
   def flushAndCommit() {
