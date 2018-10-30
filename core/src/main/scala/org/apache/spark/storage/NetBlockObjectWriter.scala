@@ -61,6 +61,7 @@ private[spark] class NetBlockObjectWriter(
 
   private var buf: ByteBuf = null
   private var objOut: SerializationStream = null
+  private var bs: OutputStream = null
   private var initialized = false
   private var streamOpen = false
   private var hasBeenClosed = false
@@ -93,7 +94,8 @@ private[spark] class NetBlockObjectWriter(
 
     buf = PooledByteBufAllocator.DEFAULT.directBuffer(bufferSize * 2)
     val ts = new TimeTrackingOutputStream(writeMetrics, new ByteBufOutputStream(buf))
-    val bs = serializerManager.wrapStream(blockId, ts)
+
+    bs = serializerManager.wrapStream(blockId, ts)
     objOut = serializerInstance.serializeStream(bs)
     streamOpen = true
     this
@@ -108,6 +110,7 @@ private[spark] class NetBlockObjectWriter(
       {
         buf = null
         objOut = null
+        bs = null
         initialized = false
         streamOpen = false
         hasBeenClosed = true
@@ -180,6 +183,7 @@ private[spark] class NetBlockObjectWriter(
       // NOTE: Because Kryo doesn't flush the underlying stream we explicitly flush both the
       //       serializer stream and the lower level stream.
       objOut.flush()
+      bs.flush()
       objOut.close()
       streamOpen = false
 
@@ -208,8 +212,8 @@ private[spark] class NetBlockObjectWriter(
       open()
     }
 
-    objOut.flush()
-    val curPosition = buf.readableBytes() + committedPosition
+    flushAndCommit()
+    val curPosition = committedPosition
 
     paritionLengths(paritionId) = curPosition - lastPosition
     lastPosition = curPosition
@@ -263,5 +267,6 @@ private[spark] class NetBlockObjectWriter(
   // For testing
   private[spark] override def flush() {
     objOut.flush()
+    bs.flush()
   }
 }
