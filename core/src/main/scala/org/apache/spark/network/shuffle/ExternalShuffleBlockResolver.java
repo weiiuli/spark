@@ -292,6 +292,7 @@ public class ExternalShuffleBlockResolver {
         }
       } catch (Exception e) {
         e.printStackTrace();
+        logger.error("Failed to writeIndexFileAndCommit {}",e);
 
       }
     } catch (FileNotFoundException e) {
