@@ -43,12 +43,42 @@ import java.util.Map;
 import static org.apache.spark.network.util.NettyUtils.getRemoteAddress;
 
 /**
+ * @author: xiuli wei JD.com
+ * @commented by: zhen fan JD.com
+ * @Date: 2018/10/23
+ */
+
+/**
  * RPC Handler for a server which can serve shuffle blocks from outside of an Executor process.
  *
  * Handles registering executors and opening shuffle blocks from them. Shuffle blocks are registered
  * with the "one-for-one" strategy, meaning each Transport-layer Chunk is equivalent to one Spark-
  * level shuffle block.
  */
+
+/**
+ * Features are added to support RPC Handler to handle with remote shuffle(spill) data.
+ * We extends UploadBlockData and UploadBlockIndex message type from BlockTransferMessage.
+ *
+ * UploadBlockData is for the real shuffle(spill) data that transferred from executor to ESS.
+ * When we received this type of message we just save data into local disk. To be noticed:
+ * 1. We use RandomAccessFile to save data from offset to offset + length
+ * 2. The handler can be called from multi threads, but we are not bothered with race condition,
+ *    in each thread we use independent file descriptor which is ensured by RandomAccessFile, we
+ *    open it, seek position, write, and close.
+ *
+ * UploadBlockIndex is a message with some metadata for the real data and when ESS received
+ * this type of message some actions can be done:
+ * 1. When index message stands for spill, it indicated that spill data have been finished.
+ For ESS, we only update spillInfoMap and this object can be used later.
+ * 2. When index message stands for write, it indicates that this mapper task is finished, we
+ *    may do some heavy work depending on ExternalShuffleUtils.mergeSpills.
+ * 3. To be noticed: we save the shuffle write file into file on local disk even there is no spill
+ *    data, which is different from Executor side implementation(InMemoryIterator).
+ *    So In ExternalShuffleUtils.mergeSpills, if spillInfoMap only have one element, it means there
+ *    are no spill files at all.
+ */
+
 public class ExternalShuffleBlockHandler extends RpcHandler {
   private static final Logger logger = LoggerFactory.getLogger(ExternalShuffleBlockHandler.class);
 
@@ -89,7 +119,7 @@ public class ExternalShuffleBlockHandler extends RpcHandler {
   }
 
   protected void handleUploadBlockData(
-          ByteBuffer body,
+          ByteBuffer headerAndBody,
           UploadBlockData msg,
           TransportClient client,
           RpcResponseCallback callback) {
@@ -98,11 +128,15 @@ public class ExternalShuffleBlockHandler extends RpcHandler {
       try{
           checkAuth(client, msg.appId);
           ExecutorShuffleInfo execInfo = blockManager.executors.get(new AppExecId(msg.appId, msg.execId));
+
+          // msg.blockId is formatted as "shuffleBlockId_uuid", split it into shuffleBlockId and uuid.
+          // Executor side generate independent uuid for every single task including speculative task which
+          // share the same mapid with previous related task. So we use tmp path with uuid to deal with this
+          // situation.
           String shuffleBlockId = msg.blockId.substring(0, msg.blockId.lastIndexOf("_"));
           String uuid = msg.blockId.substring(msg.blockId.lastIndexOf("_") + 1, msg.blockId.length());
           File outputFile;
           File outputDataFile = ExternalShuffleUtils.getFile(execInfo, shuffleBlockId + ".data");
-          //todo to be fixed: change tmpPath by uuid
           String tmpPath = outputDataFile.getAbsolutePath() + "." + uuid + ".shufflewrite";
           if (msg.flag == MessageEnum.SHUFFLE_WRITE) {
               outputFile = new File(tmpPath);
@@ -111,20 +145,21 @@ public class ExternalShuffleBlockHandler extends RpcHandler {
           }
           long statTime = System.currentTimeMillis();
           raf = new RandomAccessFile(outputFile, "rw");
-          //todo to be fixed
-          if (!body.hasArray()) {
+          // TODO to be fixed: !headerAndBody.hasArray() should never happen, never new byte[length].
+          // headerAndBody: 1 + header + body, so write data from headerAndBody[header + 1:end]
+          if (!headerAndBody.hasArray()) {
               logger.info("!body.hasArray() ");
-              ByteBuf bodybuf = Unpooled.wrappedBuffer(body);
-              int length = bodybuf.readableBytes();
+              ByteBuf headerAndBodyBuf = Unpooled.wrappedBuffer(headerAndBody);
+              int length = headerAndBodyBuf.readableBytes();
               byte[] array = new byte[length];
-              bodybuf.getBytes(bodybuf.readerIndex(), array);
+            headerAndBodyBuf.getBytes(headerAndBodyBuf.readerIndex(), array);
 
               raf.seek(msg.offset);
               raf.write(array, msg.encodedLength() + 1, msg.length);
           } else {
               logger.info("body.hasArray() ");
               raf.seek(msg.offset);
-              raf.write(body.array(), msg.encodedLength() + 1, msg.length);
+              raf.write(headerAndBody.array(), msg.encodedLength() + 1, msg.length);
           }
           logger.info("handleUploadBlockData thread-id: {}  appid: {}  execId: {}  blockId: {}  offset: {}  length: {}  check: {}  outputDataPath: {} ",
                   Thread.currentThread().getId(),
@@ -133,7 +168,7 @@ public class ExternalShuffleBlockHandler extends RpcHandler {
                   msg.blockId,
                   msg.offset,
                   msg.length,
-                  msg.length == (body.capacity() - msg.encodedLength() - 1),
+                  msg.length == (headerAndBody.capacity() - msg.encodedLength() - 1),
                   outputDataFile.getAbsolutePath()
           );
           logger.info("insert data used time--------------: {}  ", System.currentTimeMillis() - statTime);
@@ -155,7 +190,7 @@ public class ExternalShuffleBlockHandler extends RpcHandler {
   }
 
   protected void handleUploadBlockIndex(
-          ByteBuffer body,
+          ByteBuffer headerAndBody,
           UploadBlockIndex msg,
           TransportClient client,
           RpcResponseCallback callback) {
@@ -163,16 +198,19 @@ public class ExternalShuffleBlockHandler extends RpcHandler {
         checkAuth(client, msg.appId);
         ExecutorShuffleInfo execInfo = blockManager.executors.get(new AppExecId(msg.appId, msg.execId));
         String appExecIdBlockID = ExternalShuffleUtils.getAppExecIdBlockID(msg);
-        ByteBuf bodybuf = Unpooled.wrappedBuffer(body);
-        bodybuf.readerIndex(msg.encodedLength() + 1);
-        //todo to be fixed
+        ByteBuf headerAndBodyBuf = Unpooled.wrappedBuffer(headerAndBody);
+
+        // now we seek the position to the real index data
+        headerAndBodyBuf.readerIndex(msg.encodedLength() + 1);
         int numPartitions = msg.numPartition;
         if(numPartitions != msg.length / 8){
-            logger.info("NumPartitions of the msg is false");
+            logger.warn("NumPartitions should be == msg.length / 8");
         }
+
+        // read every length one by one from the body
         long[] lengths = new long[numPartitions];
         for (int i = 0; i < numPartitions; i++) {
-            lengths[i] = bodybuf.readLong();
+            lengths[i] = headerAndBodyBuf.readLong();
         }
 
         String shuffleBlockId = msg.blockId.substring(0, msg.blockId.lastIndexOf("_"));
@@ -186,6 +224,8 @@ public class ExternalShuffleBlockHandler extends RpcHandler {
         } else {
             spillFile = ExternalShuffleUtils.getFile(execInfo, msg.blockId + "." + msg.flag);
         }
+
+        // update the singleton shuffleindexs object, which records the shuffle and spill information
         SpillInfo spillInfo = new SpillInfo(numPartitions, spillFile, lengths);
 
         blockManager.updateShuffleindexs(appExecIdBlockID, spillInfo, msg.flag);
@@ -198,7 +238,15 @@ public class ExternalShuffleBlockHandler extends RpcHandler {
                 msg.length,
                 spillFile.getAbsolutePath()
         );
-        // merge spill
+
+        /**
+         * If what we received is not a SHUFFLE_WRITE index message, stop here, we just update spill information.
+         * If we received a SHUFFLE_WRITE index message, it means all works have been done in the Executor side,
+         * and the Executor waits for the final result. For ESS, traverse the shuffleindexs to get spillInfos.
+         * (A) when there is only one shuffle file, we just move the tmpfile to the ".data" file. (B) when there
+         * are more than one file, spills have been occurred we do merge files job to generate one ".data" file.
+         * Note: we use FileChannel.transferTo function to merge file segments(zero copy).
+         */
         if (msg.flag == MessageEnum.SHUFFLE_WRITE) {
             File outputIndexFile = ExternalShuffleUtils.getFile(execInfo, shuffleBlockId + ".index");
             Map<Integer, SpillInfo> map = blockManager.shuffleindexs.get(appExecIdBlockID);

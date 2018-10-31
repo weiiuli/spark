@@ -68,7 +68,8 @@ public class ExternalShuffleBlockResolver {
   // Map containing all registered executors' metadata.
   @VisibleForTesting
   final ConcurrentMap<AppExecId, ExecutorShuffleInfo> executors;
-  //todo to be fixed
+  // TODO to be fixed: now key is appExecIdBlockID, later when we want to delete
+  // application level shuffle data, it will take a long time to do such job
   final ConcurrentMap<String, ConcurrentMap<Integer,SpillInfo>> shuffleindexs;
   /**
    *  Caches index file information so that we can avoid open/close the index files

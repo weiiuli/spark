@@ -24,48 +24,19 @@ import org.apache.spark.internal.Logging
 import org.apache.spark.shuffle._
 
 /**
- * In sort-based shuffle, incoming records are sorted according to their target partition ids, then
- * written to a single map output file. Reducers fetch contiguous regions of this file in order to
- * read their portion of the map output. In cases where the map output data is too large to fit in
- * memory, sorted subsets of the output can are spilled to disk and those on-disk files are merged
- * to produce the final output file.
- *
- * Sort-based shuffle has two different write paths for producing its map output files:
- *
- *  - Serialized sorting: used when all three of the following conditions hold:
- *    1. The shuffle dependency specifies no aggregation or output ordering.
- *    2. The shuffle serializer supports relocation of serialized values (this is currently
- *       supported by KryoSerializer and Spark SQL's custom serializers).
- *    3. The shuffle produces fewer than 16777216 output partitions.
- *  - Deserialized sorting: used to handle all other cases.
- *
- * -----------------------
- * Serialized sorting mode
- * -----------------------
- *
- * In the serialized sorting mode, incoming records are serialized as soon as they are passed to the
- * shuffle writer and are buffered in a serialized form during sorting. This write path implements
- * several optimizations:
- *
- *  - Its sort operates on serialized binary data rather than Java objects, which reduces memory
- *    consumption and GC overheads. This optimization requires the record serializer to have certain
- *    properties to allow serialized records to be re-ordered without requiring deserialization.
- *    See SPARK-4550, where this optimization was first proposed and implemented, for more details.
- *
- *  - It uses a specialized cache-efficient sorter ([[ShuffleExternalSorter]]) that sorts
- *    arrays of compressed record pointers and partition ids. By using only 8 bytes of space per
- *    record in the sorting array, this fits more of the array into cache.
- *
- *  - The spill merging procedure operates on blocks of serialized records that belong to the same
- *    partition and does not need to deserialize records during the merge.
- *
- *  - When the spill compression codec supports concatenation of compressed data, the spill merge
- *    simply concatenates the serialized and compressed spill partitions to produce the final output
- *    partition.  This allows efficient data copying methods, like NIO's `transferTo`, to be used
- *    and avoids the need to allocate decompression or copying buffers during the merge.
- *
- * For more details on these optimizations, see SPARK-7081.
+ * @author: lei shi JD.com
+ * @commented by: zhen fan JD.com
+ * @Date: 2018/10/23
  */
+
+/**
+ * This file is based on the SortShuffleManager. In SortShuffleManager incoming records are sorted
+ * according to their target partition ids, then written to a single map output file.
+ * In RemoteShuffleManager we send out the shuffle(spill) data to the network using netty framework,
+ * instead of local disk. Doing so, we wanna get achieve these goals:
+ * 1. xxxx(to be finished)
+ */
+
 private[spark] class RemoteShuffleManager(conf: SparkConf) extends ShuffleManager with Logging {
 
   if (!conf.getBoolean("spark.shuffle.spill", true)) {
