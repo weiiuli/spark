@@ -33,7 +33,7 @@ trait ManagerSpecificHandlers {
   def createKubernetesClient(sparkConf: SparkConf): KubernetesClient
 }
 
-abstract private[spark] class KubernetesClusterManager extends ExternalClusterManager with ManagerSpecificHandlers with Logging {
+private[spark] class KubernetesClusterManager extends ExternalClusterManager with ManagerSpecificHandlers with Logging {
 
   override def canCreate(masterURL: String): Boolean = masterURL.startsWith("k8s")
 
@@ -66,7 +66,7 @@ abstract private[spark] class KubernetesClusterManager extends ExternalClusterMa
         Some(new File(Config.KUBERNETES_SERVICE_ACCOUNT_CA_CRT_PATH)))
     }
   }
-
+  override def createKubernetesClient(sparkConf: SparkConf): KubernetesClient = null
 
   override def createSchedulerBackend(
                                        sc: SparkContext,

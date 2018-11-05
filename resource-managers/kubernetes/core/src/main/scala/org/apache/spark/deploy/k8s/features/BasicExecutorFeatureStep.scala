@@ -42,7 +42,12 @@ private[spark] class BasicExecutorFeatureStep(
     .sparkConf
     .getInt("spark.blockmanager.port", DEFAULT_BLOCKMANAGER_PORT)
 
-  private val executorPodNamePrefix = kubernetesConf.appResourceNamePrefix
+  private val executorPodNamePrefix = {
+    if(kubernetesConf.appResourceNamePrefix == "spark"){
+        kubernetesConf.appId
+    }
+    else kubernetesConf.appResourceNamePrefix
+  }
 
   private val driverUrl = RpcEndpointAddress(
     kubernetesConf.get("spark.driver.host"),
@@ -120,14 +125,14 @@ private[spark] class BasicExecutorFeatureStep(
           .build())
         .build()
     ) ++ executorExtraJavaOptionsEnv ++ executorExtraClasspathEnv.toSeq
-    val requiredPorts = Seq(
-      (BLOCK_MANAGER_PORT_NAME, blockManagerPort))
-      .map { case (name, port) =>
-        new ContainerPortBuilder()
-          .withName(name)
-          .withContainerPort(port)
-          .build()
-      }
+//    val requiredPorts = Seq(
+//      (BLOCK_MANAGER_PORT_NAME, blockManagerPort))
+//      .map { case (name, port) =>
+//        new ContainerPortBuilder()
+//          .withName(name)
+//          .withContainerPort(port)
+//          .build()
+//      }
 
     val executorContainer = new ContainerBuilder(pod.container)
       .withName("executor")
@@ -140,7 +145,7 @@ private[spark] class BasicExecutorFeatureStep(
         .addToLimits("cpu", executorCpuQuantity)
         .endResources()
       .addAllToEnv(executorEnv.asJava)
-      .withPorts(requiredPorts.asJava)
+//      .withPorts(requiredPorts.asJava)
       .addToArgs("executor")
       .build()
 
