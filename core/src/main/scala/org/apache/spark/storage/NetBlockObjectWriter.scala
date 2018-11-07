@@ -241,7 +241,12 @@ private[spark] class NetBlockObjectWriter(
 
   override def write(b: Int): Unit = throw new UnsupportedOperationException()
 
-  override def write(kvBytes: Array[Byte], offs: Int, len: Int): Unit = throw new UnsupportedOperationException()
+  override def write(kvBytes: Array[Byte], offs: Int, len: Int): Unit = {
+    if (!streamOpen) {
+      open()
+    }
+    bs.write(kvBytes, offs, len)
+  }
 
   /**
    * Notify the writer that a record worth of bytes has been written with OutputStream#write.
