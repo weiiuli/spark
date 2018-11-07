@@ -18,13 +18,15 @@
 package org.apache.spark.shuffle.remote;
 
 import javax.annotation.Nullable;
-import java.io.File;
 import java.io.IOException;
 import java.util.LinkedList;
+import java.util.UUID;
+import java.nio.ByteBuffer;
 
-import scala.Tuple2;
+import scala.collection.mutable.ArrayBuffer;
 
 import com.google.common.annotations.VisibleForTesting;
+import com.google.common.util.concurrent.SettableFuture;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -39,9 +41,8 @@ import org.apache.spark.memory.TooLargePageException;
 import org.apache.spark.serializer.DummySerializerInstance;
 import org.apache.spark.serializer.SerializerInstance;
 import org.apache.spark.storage.BlockManager;
-import org.apache.spark.storage.DiskBlockObjectWriter;
-import org.apache.spark.storage.FileSegment;
-import org.apache.spark.storage.TempShuffleBlockId;
+import org.apache.spark.storage.NetBlockObjectWriter;
+import org.apache.spark.storage.BlockId;
 import org.apache.spark.unsafe.Platform;
 import org.apache.spark.unsafe.array.LongArray;
 import org.apache.spark.unsafe.memory.MemoryBlock;
@@ -105,6 +106,14 @@ final class ShuffleExternalSorter extends MemoryConsumer {
   @Nullable private MemoryBlock currentPage = null;
   private long pageCursor = -1;
 
+  private ArrayBuffer<SettableFuture<ByteBuffer>> settableFutureResults = new ArrayBuffer<SettableFuture<ByteBuffer>>();
+
+  private String taskUUID = UUID.randomUUID().toString();
+
+  private int remoteWriteTimeout = 0;
+
+  private BlockId blockId;
+
   ShuffleExternalSorter(
       TaskMemoryManager memoryManager,
       BlockManager blockManager,
@@ -112,7 +121,8 @@ final class ShuffleExternalSorter extends MemoryConsumer {
       int initialSize,
       int numPartitions,
       SparkConf conf,
-      ShuffleWriteMetrics writeMetrics) {
+      ShuffleWriteMetrics writeMetrics,
+      BlockId blockId) {
     super(memoryManager,
       (int) Math.min(PackedRecordPointer.MAXIMUM_PAGE_SIZE_BYTES, memoryManager.pageSizeBytes()),
       memoryManager.getTungstenMemoryMode());
@@ -131,6 +141,8 @@ final class ShuffleExternalSorter extends MemoryConsumer {
     this.peakMemoryUsedBytes = getMemoryUsage();
     this.diskWriteBufferSize =
         (int) (long) conf.get(package$.MODULE$.SHUFFLE_DISK_WRITE_BUFFER_SIZE());
+    this.remoteWriteTimeout = conf.getInt("spark.shuffle.remote.write.timeout", 30 * 1000);
+    this.blockId = blockId;
   }
 
   /**
@@ -144,11 +156,14 @@ final class ShuffleExternalSorter extends MemoryConsumer {
   private void writeSortedFile(boolean isLastFile) {
 
     final ShuffleWriteMetrics writeMetricsToUse;
+    final int flag;
 
     if (isLastFile) {
+      flag = 0;
       // We're writing the final non-spill file, so we _do_ want to count this as shuffle bytes.
       writeMetricsToUse = writeMetrics;
     } else {
+      flag = spills.size() + 1;
       // We're spilling, so bytes written should be counted towards spill rather than write.
       // Create a dummy WriteMetrics object to absorb these metrics, since we don't want to count
       // them towards shuffle bytes written.
@@ -165,23 +180,16 @@ final class ShuffleExternalSorter extends MemoryConsumer {
     // record;
     final byte[] writeBuffer = new byte[diskWriteBufferSize];
 
-    // Because this output will be read during shuffle, its compression codec must be controlled by
-    // spark.shuffle.compress instead of spark.shuffle.spill.compress, so we need to use
-    // createTempShuffleBlock here; see SPARK-3426 for more details.
-    final Tuple2<TempShuffleBlockId, File> spilledFileInfo =
-      blockManager.diskBlockManager().createTempShuffleBlock();
-    final File file = spilledFileInfo._2();
-    final TempShuffleBlockId blockId = spilledFileInfo._1();
-    final SpillInfo spillInfo = new SpillInfo(numPartitions, file, blockId);
-
     // Unfortunately, we need a serializer instance in order to construct a DiskBlockObjectWriter.
     // Our write path doesn't actually use this serializer (since we end up calling the `write()`
     // OutputStream methods), but DiskBlockObjectWriter still calls some methods on it. To work
     // around this, we pass a dummy no-op serializer.
     final SerializerInstance ser = DummySerializerInstance.INSTANCE;
 
-    final DiskBlockObjectWriter writer =
-      blockManager.getDiskWriter(blockId, file, ser, fileBufferSizeBytes, writeMetricsToUse);
+    final NetBlockObjectWriter writer = new NetBlockObjectWriter(blockManager,
+            blockManager.serializerManager(), ser, fileBufferSizeBytes, false,
+            writeMetricsToUse, numPartitions, flag, settableFutureResults,
+            taskUUID, remoteWriteTimeout, blockId);
 
     int currentPartition = -1;
     while (sortedRecords.hasNext()) {
@@ -191,8 +199,7 @@ final class ShuffleExternalSorter extends MemoryConsumer {
       if (partition != currentPartition) {
         // Switch to the new partition
         if (currentPartition != -1) {
-          final FileSegment fileSegment = writer.commitAndGet();
-          spillInfo.partitionLengths[currentPartition] = fileSegment.length();
+          writer.recordParition(partition);
         }
         currentPartition = partition;
       }
@@ -212,16 +219,18 @@ final class ShuffleExternalSorter extends MemoryConsumer {
       }
       writer.recordWritten();
     }
-
-    final FileSegment committedSegment = writer.commitAndGet();
-    writer.close();
     // If `writeSortedFile()` was called from `closeAndGetSpills()` and no records were inserted,
     // then the file might be empty. Note that it might be better to avoid calling
     // writeSortedFile() in that case.
     if (currentPartition != -1) {
-      spillInfo.partitionLengths[currentPartition] = committedSegment.length();
+      writer.recordParition(currentPartition);
+      long[] lengths = writer.commitAndGet();
+
+      final SpillInfo spillInfo = new SpillInfo(lengths);
       spills.add(spillInfo);
     }
+
+    writer.close();
 
     if (!isLastFile) {  // i.e. this is a spill file
       // The current semantics of `shuffleRecordsWritten` seem to be that it's updated when records
@@ -313,11 +322,6 @@ final class ShuffleExternalSorter extends MemoryConsumer {
     if (inMemSorter != null) {
       inMemSorter.free();
       inMemSorter = null;
-    }
-    for (SpillInfo spill : spills) {
-      if (spill.file.exists() && !spill.file.delete()) {
-        logger.error("Unable to delete spill file {}", spill.file.getPath());
-      }
     }
   }
 
