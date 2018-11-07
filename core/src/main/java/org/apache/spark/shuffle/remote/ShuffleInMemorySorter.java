@@ -17,14 +17,14 @@
 
 package org.apache.spark.shuffle.remote;
 
+import java.util.Comparator;
+
 import org.apache.spark.memory.MemoryConsumer;
 import org.apache.spark.unsafe.Platform;
 import org.apache.spark.unsafe.array.LongArray;
 import org.apache.spark.unsafe.memory.MemoryBlock;
 import org.apache.spark.util.collection.Sorter;
 import org.apache.spark.util.collection.unsafe.sort.RadixSort;
-
-import java.util.Comparator;
 
 final class ShuffleInMemorySorter {
 

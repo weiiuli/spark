@@ -17,8 +17,23 @@
 
 package org.apache.spark.shuffle.remote;
 
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import javax.annotation.Nullable;
+
+import scala.None$;
+import scala.Option;
+import scala.Product2;
+import scala.Tuple2;
+import scala.collection.Iterator;
+
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.io.Closeables;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import org.apache.spark.Partitioner;
 import org.apache.spark.ShuffleDependency;
 import org.apache.spark.SparkConf;
@@ -30,34 +45,19 @@ import org.apache.spark.serializer.Serializer;
 import org.apache.spark.serializer.SerializerInstance;
 import org.apache.spark.shuffle.IndexShuffleBlockResolver;
 import org.apache.spark.shuffle.ShuffleWriter;
-import org.apache.spark.shuffle.sort.BypassMergeSortShuffleHandle;
-import org.apache.spark.shuffle.sort.SortShuffleManager;
 import org.apache.spark.storage.*;
 import org.apache.spark.util.Utils;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-import scala.None$;
-import scala.Option;
-import scala.Product2;
-import scala.Tuple2;
-import scala.collection.Iterator;
-
-import javax.annotation.Nullable;
-import java.io.File;
-import java.io.FileInputStream;
-import java.io.FileOutputStream;
-import java.io.IOException;
 
 /**
  * This class implements sort-based shuffle's hash-style shuffle fallback path. This write path
  * writes incoming records to separate files, one file per reduce partition, then concatenates these
  * per-partition files to form a single output file, regions of which are served to reducers.
  * Records are not buffered in memory. It writes output in a format
- * that can be served / consumed via {@link IndexShuffleBlockResolver}.
+ * that can be served / consumed via {@link org.apache.spark.shuffle.IndexShuffleBlockResolver}.
  * <p>
  * This write path is inefficient for shuffles with large numbers of reduce partitions because it
  * simultaneously opens separate serializers and file streams for all partitions. As a result,
- * {@link SortShuffleManager} only selects this write path when
+ * {@link RemoteSortShuffleManager} only selects this write path when
  * <ul>
  *    <li>no Ordering is specified,</li>
  *    <li>no Aggregator is specified, and</li>
