@@ -112,6 +112,8 @@ private[spark] class RemoteExternalSorter[K, V, C](
 
   // Use getSizeAsKb (not bytes) to maintain backwards compatibility if no units are provided
   private val fileBufferSize = conf.getSizeAsKb("spark.shuffle.file.buffer", "64k").toInt * 1024
+  private val writeTimeout = conf.getInt("spark.shuffle.remote.write.timeout", 30 * 1000);
+  private val syncWrite = conf.getBoolean("spark.shuffle.remote.sync.write", true);
 
   // Data structures to store in-memory objects before we spill. Depending on whether we have an
   // Aggregator set, we either put objects into an AppendOnlyMap where we combine them, or we
@@ -223,8 +225,8 @@ private[spark] class RemoteExternalSorter[K, V, C](
    * @param collection whichever collection we're using (map or buffer)
    */
   override protected[this] def spill(collection: WritablePartitionedPairCollection[K, C]): Unit = {
-    val writer = new NetBlockObjectWriter(blockManager, serializerManager, serInstance, fileBufferSize, false,
-      context.taskMetrics().shuffleWriteMetrics, numPartitions, spills.length + 1, settableFutureResults, taskUUID, conf.getInt("spark.shuffle.remote.write.timeout", 30 * 1000), blockId)
+    val writer = new NetBlockObjectWriter(blockManager, serializerManager, serInstance, fileBufferSize, syncWrite,
+      context.taskMetrics().shuffleWriteMetrics, numPartitions, spills.length + 1, settableFutureResults, taskUUID, writeTimeout, blockId)
     val it = collection.destructiveSortedWritablePartitionedIterator(comparator)
     while (it.hasNext) {
       val partitionId = it.nextPartition()
@@ -248,8 +250,8 @@ private[spark] class RemoteExternalSorter[K, V, C](
    * @return array of lengths, in bytes, of each partition of the file (used by map output tracker)
    */
   def remoteWritePartitioned(): Array[Long] = {
-    val writer = new NetBlockObjectWriter(blockManager, serializerManager, serInstance, fileBufferSize, false,
-      context.taskMetrics().shuffleWriteMetrics, numPartitions, 0, settableFutureResults, taskUUID, conf.getInt("spark.shuffle.remote.write.timeout", 30 * 1000), blockId)
+    val writer = new NetBlockObjectWriter(blockManager, serializerManager, serInstance, fileBufferSize, syncWrite,
+      context.taskMetrics().shuffleWriteMetrics, numPartitions, 0, settableFutureResults, taskUUID, writeTimeout, blockId)
     val collection = if (aggregator.isDefined) map else buffer
     val it = collection.destructiveSortedWritablePartitionedIterator(comparator)
     while (it.hasNext) {

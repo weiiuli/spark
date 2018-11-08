@@ -140,7 +140,7 @@ public class ExternalShuffleClient extends ShuffleClient {
       CompositeByteBuf msg = PooledByteBufAllocator.DEFAULT.compositeDirectBuffer();
       msg.addComponents(true, Unpooled.wrappedBuffer(new UploadBlockData(appId, execId, blockIdName, flag, length, offset).toByteBuffer()), blockData);
 
-     logger.info("uploadBlockData blockId: {} flag: {} len: {} offset: {} bufLen: {}", blockIdName, flag, length, offset, msg.readableBytes());
+     logger.debug("uploadBlockData blockId: {} flag: {} len: {} offset: {} bufLen: {}", blockIdName, flag, length, offset, msg.readableBytes());
       client.sendRpc(msg,
               new RpcResponseCallback() {
                 @Override
@@ -179,7 +179,7 @@ public class ExternalShuffleClient extends ShuffleClient {
       CompositeByteBuf msg = PooledByteBufAllocator.DEFAULT.compositeDirectBuffer();
       msg.addComponents(true, Unpooled.wrappedBuffer(new UploadBlockIndex(appId, execId, blockIdName, flag, length, numPartition).toByteBuffer()), offsets);
 
-      logger.info("uploadBlockData blockId: {} flag: {} len: {} bufLen: {}", blockIdName, flag, length, msg.readableBytes());
+      logger.debug("uploadBlockData blockId: {} flag: {} len: {} bufLen: {}", blockIdName, flag, length, msg.readableBytes());
       return client.sendRpcSync(msg, timeoutMs);
     } catch (Exception e) {
       logger.error("Exception while beginning uploadBlock", e);

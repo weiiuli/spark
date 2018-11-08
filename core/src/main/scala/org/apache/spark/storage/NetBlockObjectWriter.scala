@@ -149,7 +149,7 @@ private[spark] class NetBlockObjectWriter(
       if(syncWrites || 0 == flag) {
         val statTime = System.currentTimeMillis
         results.foreach(ret => ret.get(timeoutMs, TimeUnit.MILLISECONDS))
-        logInfo(s"Received all responses for UploadBlockData, time: ${System.currentTimeMillis - statTime} ms")
+        logDebug(s"Received all responses for UploadBlockData, time: ${System.currentTimeMillis - statTime} ms")
       }
 
       var buffer: ByteBuf = null
@@ -170,7 +170,7 @@ private[spark] class NetBlockObjectWriter(
         buffer,
         timeoutMs
       )
-      logInfo(s"Received response for UploadBlockIndex, flag: $flag time: ${System.currentTimeMillis - statTime} ms")
+      logDebug(s"Received response for UploadBlockIndex, flag: $flag time: ${System.currentTimeMillis - statTime} ms")
 
       paritionLengths
     } else {
