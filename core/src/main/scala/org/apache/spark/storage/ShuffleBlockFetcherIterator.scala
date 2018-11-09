@@ -17,15 +17,15 @@
 
 package org.apache.spark.storage
 
-import java.io.{File, InputStream, IOException}
+import java.io.{File, IOException, InputStream}
 import java.nio.ByteBuffer
 import java.util.concurrent.LinkedBlockingQueue
+
 import javax.annotation.concurrent.GuardedBy
 
 import scala.collection.mutable
 import scala.collection.mutable.{ArrayBuffer, HashMap, HashSet, Queue}
-
-import org.apache.spark.{SparkException, TaskContext}
+import org.apache.spark.{SparkEnv, SparkException, TaskContext}
 import org.apache.spark.internal.Logging
 import org.apache.spark.network.buffer.{FileSegmentManagedBuffer, ManagedBuffer}
 import org.apache.spark.network.shuffle.{BlockFetchingListener, ShuffleClient, TempFileManager}
@@ -271,7 +271,9 @@ final class ShuffleBlockFetcherIterator(
     var totalBlocks = 0
     for ((address, blockInfos) <- blocksByAddress) {
       totalBlocks += blockInfos.size
-      if (address.executorId == blockManager.blockManagerId.executorId) {
+      val shuffleMgrName = SparkEnv.get.conf.get("spark.shuffle.manager", "sort")
+      if (!shuffleMgrName.equals("remote") && address.executorId == blockManager.blockManagerId.executorId) {
+        logDebug(s"address.executorId == blockManager.blockManagerId.executorId: $shuffleMgrName")
         // Filter out zero-sized blocks
         localBlocks ++= blockInfos.filter(_._2 != 0).map(_._1)
         numBlocksToFetch += localBlocks.size
@@ -304,6 +306,7 @@ final class ShuffleBlockFetcherIterator(
         if (curBlocks.nonEmpty) {
           remoteRequests += new FetchRequest(address, curBlocks)
         }
+        logDebug(s"address.executorId != blockManager.blockManagerId.executorId: $shuffleMgrName")
       }
     }
     logInfo(s"Getting $numBlocksToFetch non-empty blocks out of $totalBlocks blocks")
