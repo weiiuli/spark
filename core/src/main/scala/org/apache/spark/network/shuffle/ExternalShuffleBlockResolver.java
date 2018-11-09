@@ -71,6 +71,8 @@ public class ExternalShuffleBlockResolver {
   // TODO to be fixed: now key is appExecIdBlockID, later when we want to delete
   // application level shuffle data, it will take a long time to do such job
   final ConcurrentMap<String, ConcurrentMap<Integer,SpillInfo>> shuffleindexs;
+
+  final ExecutorService handlerPool;
   /**
    *  Caches index file information so that we can avoid open/close the index files
    *  for each block fetch.
@@ -130,6 +132,8 @@ public class ExternalShuffleBlockResolver {
     }
     this.directoryCleaner = directoryCleaner;
     shuffleindexs =new ConcurrentHashMap<>();
+    handlerPool = new ThreadPoolExecutor(conf.getInt("spark.shuffle.service.mergeSpills.corePoolSize",10),
+            conf.getInt("spark.shuffle.service.mergeSpills.maximumPoolSize",30),0L, TimeUnit.MILLISECONDS, new LinkedBlockingQueue<Runnable>());
   }
 
   public int getRegisteredExecutorsSize() {

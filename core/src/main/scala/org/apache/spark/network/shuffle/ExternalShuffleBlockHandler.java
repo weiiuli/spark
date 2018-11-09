@@ -39,6 +39,7 @@ import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.Map;
+import java.util.concurrent.*;
 
 import static org.apache.spark.network.util.NettyUtils.getRemoteAddress;
 
@@ -87,6 +88,7 @@ public class ExternalShuffleBlockHandler extends RpcHandler {
   private final OneForOneStreamManager streamManager;
   private final ShuffleMetrics metrics;
 
+
   public ExternalShuffleBlockHandler(TransportConf conf, File registeredExecutorFile)
     throws IOException {
     this(new OneForOneStreamManager(),
@@ -112,7 +114,9 @@ public class ExternalShuffleBlockHandler extends RpcHandler {
 
     } else if (msgObj instanceof  UploadBlockIndex ) {
       UploadBlockIndex msg = (UploadBlockIndex) msgObj;
+
       handleUploadBlockIndex(message, msg, client, callback);
+
     } else {
       handleMessage(msgObj, client, callback);
     }
@@ -136,9 +140,9 @@ public class ExternalShuffleBlockHandler extends RpcHandler {
           String shuffleBlockId = msg.blockId.substring(0, msg.blockId.lastIndexOf("_"));
           String uuid = msg.blockId.substring(msg.blockId.lastIndexOf("_") + 1, msg.blockId.length());
           File outputFile;
-          File outputDataFile = ExternalShuffleUtils.getFile(execInfo, shuffleBlockId + ".data");
-          String tmpPath = outputDataFile.getAbsolutePath() + "." + uuid + ".shufflewrite";
           if (msg.flag == MessageEnum.SHUFFLE_WRITE) {
+            File outputDataFile = ExternalShuffleUtils.getFile(execInfo, shuffleBlockId + ".data");
+            String tmpPath = outputDataFile.getAbsolutePath() + "." + uuid + ".shufflewrite";
               outputFile = new File(tmpPath);
           } else {
               outputFile = ExternalShuffleUtils.getFile(execInfo, msg.blockId + "." + msg.flag);
@@ -148,7 +152,7 @@ public class ExternalShuffleBlockHandler extends RpcHandler {
           // TODO to be fixed: !headerAndBody.hasArray() should never happen, never new byte[length].
           // headerAndBody: 1 + header + body, so write data from headerAndBody[header + 1:end]
           if (!headerAndBody.hasArray()) {
-              logger.info("!body.hasArray() ");
+              logger.debug("!body.hasArray() ");
               ByteBuf headerAndBodyBuf = Unpooled.wrappedBuffer(headerAndBody);
               int length = headerAndBodyBuf.readableBytes();
               byte[] array = new byte[length];
@@ -157,11 +161,11 @@ public class ExternalShuffleBlockHandler extends RpcHandler {
               raf.seek(msg.offset);
               raf.write(array, msg.encodedLength() + 1, msg.length);
           } else {
-              logger.info("body.hasArray() ");
+              logger.debug("body.hasArray() ");
               raf.seek(msg.offset);
               raf.write(headerAndBody.array(), msg.encodedLength() + 1, msg.length);
           }
-          logger.info("handleUploadBlockData thread-id: {}  appid: {}  execId: {}  blockId: {}  offset: {}  length: {}  check: {}  outputDataPath: {} ",
+          logger.debug("handleUploadBlockData thread-id: {}  appid: {}  execId: {}  blockId: {}  offset: {}  length: {}  check: {}  outputFile: {} ",
                   Thread.currentThread().getId(),
                   msg.appId,
                   msg.execId,
@@ -169,9 +173,9 @@ public class ExternalShuffleBlockHandler extends RpcHandler {
                   msg.offset,
                   msg.length,
                   msg.length == (headerAndBody.capacity() - msg.encodedLength() - 1),
-                  outputDataFile.getAbsolutePath()
+                  outputFile.getAbsolutePath()
           );
-          logger.info("insert data used time--------------: {}  ", System.currentTimeMillis() - statTime);
+          logger.debug("insert data used time--------------: {}  ", System.currentTimeMillis() - statTime);
           callback.onSuccess(ByteBuffer.wrap(new byte[0]));
 
       } catch (Exception e) {
@@ -215,8 +219,7 @@ public class ExternalShuffleBlockHandler extends RpcHandler {
 
         String shuffleBlockId = msg.blockId.substring(0, msg.blockId.lastIndexOf("_"));
         String uuid = msg.blockId.substring(msg.blockId.lastIndexOf("_") + 1, msg.blockId.length());
-
-        File outputDataFile = ExternalShuffleUtils.getFile(execInfo, shuffleBlockId + ".data");
+        File outputDataFile = ExternalShuffleUtils.getFile(execInfo, shuffleBlockId + ".data");;
         File spillFile;
         if (msg.flag == MessageEnum.SHUFFLE_WRITE) {
             String tmpPath = outputDataFile.getAbsolutePath() + "." + uuid + ".shufflewrite";
@@ -230,7 +233,7 @@ public class ExternalShuffleBlockHandler extends RpcHandler {
 
         blockManager.updateShuffleindexs(appExecIdBlockID, spillInfo, msg.flag);
 
-        logger.info("handleUploadBlockIndex thread-id: {}  appid: {}  execId: {}  blockId: {}  length: {}  spillFilePath: {} ",
+        logger.debug("handleUploadBlockIndex thread-id: {}  appid: {}  execId: {}  blockId: {}  length: {}  spillFilePath: {} ",
                 Thread.currentThread().getId(),
                 msg.appId,
                 msg.execId,
@@ -248,30 +251,44 @@ public class ExternalShuffleBlockHandler extends RpcHandler {
          * Note: we use FileChannel.transferTo function to merge file segments(zero copy).
          */
         if (msg.flag == MessageEnum.SHUFFLE_WRITE) {
-            File outputIndexFile = ExternalShuffleUtils.getFile(execInfo, shuffleBlockId + ".index");
-            Map<Integer, SpillInfo> map = blockManager.shuffleindexs.get(appExecIdBlockID);
-            int numFiles = map.size();
-            SpillInfo[] spillInfos = new SpillInfo[numFiles];
+          blockManager.handlerPool.submit(new Runnable() {
+            @Override
+            public void run() {
+              try {
+                File outputIndexFile = ExternalShuffleUtils.getFile(execInfo, shuffleBlockId + ".index");
+                Map<Integer, SpillInfo> map = blockManager.shuffleindexs.get(appExecIdBlockID);
+                int numFiles = map.size();
+                SpillInfo[] spillInfos = new SpillInfo[numFiles];
 
-            for (Map.Entry<Integer, SpillInfo> e : map.entrySet()) {
-                spillInfos[e.getKey()] = e.getValue();
+                for (Map.Entry<Integer, SpillInfo> e : map.entrySet()) {
+                  spillInfos[e.getKey()] = e.getValue();
+                }
+                logger.info("--------------numFiles--------------: {} ", numFiles);
+
+                File tmp = Utils.tempFileWith(outputDataFile);
+                long statTime = System.currentTimeMillis();
+                long[] partitionLengths = ExternalShuffleUtils.mergeSpills(spillInfos, tmp, numPartitions);
+                logger.info("merge data used time--------------: {}  ", System.currentTimeMillis() - statTime);
+                statTime = System.currentTimeMillis();
+                blockManager.writeIndexFileAndCommit(outputIndexFile, outputDataFile, tmp, partitionLengths);
+                logger.debug("create indexfile used time--------------: {} ", System.currentTimeMillis() - statTime);
+                ByteArrayOutputStream buf = blockManager.getByteArrayOutputStream(lengths);
+                logger.info("handleUploadBlockIndex thread-id-merge: {}  appid: {}  execId: {}  blockId: {}  length: {}  spillFilePath: {} ",
+                        Thread.currentThread().getId(),
+                        msg.appId,
+                        msg.execId,
+                        msg.blockId,
+                        msg.length,
+                        spillFile.getAbsolutePath()
+                );
+                callback.onSuccess(ByteBuffer.wrap(buf.toByteArray()));
+              } catch (Exception e) {
+                e.printStackTrace();
+                callback.onFailure(e);
+              }
+
             }
-            logger.info("--------------numFiles--------------: {} ", numFiles);
-
-            File tmp = Utils.tempFileWith(outputDataFile);
-
-            long statTime = System.currentTimeMillis();
-
-            long [] partitionLengths = ExternalShuffleUtils.mergeSpills(spillInfos, tmp, numPartitions);
-
-            logger.info("merge data used time--------------: {}  ", System.currentTimeMillis() - statTime);
-            statTime = System.currentTimeMillis();
-
-            blockManager.writeIndexFileAndCommit(outputIndexFile, outputDataFile, tmp, partitionLengths);
-            logger.info("create indexfile used time--------------: {}  indexfile--------------partitionLengths: {} ", System.currentTimeMillis() - statTime, Arrays.toString(partitionLengths));
-            ByteArrayOutputStream buf = blockManager.getByteArrayOutputStream(lengths);
-
-            callback.onSuccess(ByteBuffer.wrap(buf.toByteArray()));
+          });
         } else {
 
             callback.onSuccess(ByteBuffer.wrap(new byte[0]));
