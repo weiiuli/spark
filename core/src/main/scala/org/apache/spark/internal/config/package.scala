@@ -525,4 +525,6 @@ package object config {
       .checkValue(v => v > 0, "The threshold should be positive.")
       .createWithDefault(10000000)
 
+  private[spark] val REMOTE_SHUFFLE_MANAGE_RNAME ="remote"
+
 }
