@@ -301,9 +301,9 @@ public class ExternalShuffleUtils {
     int subDirId = (hash / execInfo.localDirs.length) % execInfo.subDirsPerLocalDir;
     // Create the subdirectory if it doesn't already exist
     File newDir = new File(execInfo.localDirs[dirId], Integer.toString(subDirId & 0xff | 0x100, 16).substring(1));
-    if (!newDir.exists() && !newDir.mkdir()) {
-      logger.error("Failed to create local dir in $newDir");
-    }
+//    if (!newDir.exists() && !newDir.mkdir()) {
+//      logger.error("Failed to create local dir in $newDir");
+//    }
     return new File(newDir, filename);
   }
 

@@ -276,7 +276,14 @@ private[spark] class BlockManager(
     val shuffleConfig = new ExecutorShuffleInfo(
       diskBlockManager.localDirs.map(_.toString),
       diskBlockManager.subDirsPerLocalDir,
-      shuffleManager.getClass.getName)
+      shuffleManager.getClass.getName,
+      conf.getBoolean("spark.shuffle.compress", true),
+      conf.get("spark.io.compression.codec", "lz4"),
+      conf.get("spark.serializer", "org.apache.spark.serializer.JavaSerializer"),
+      conf.getBoolean("spark.shuffle.unsafe.fastMergeEnabled", true),
+      conf.getBoolean("spark.file.transferTo", true))
+
+    logInfo(s"ExecutorShuffleInfo: ${shuffleConfig.toString()}")
 
     val MAX_ATTEMPTS = conf.get(config.SHUFFLE_REGISTRATION_MAX_ATTEMPTS)
     val SLEEP_TIME_SECS = 5

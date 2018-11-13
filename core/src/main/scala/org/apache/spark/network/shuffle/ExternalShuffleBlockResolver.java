@@ -332,7 +332,24 @@ public class ExternalShuffleBlockResolver {
     } catch (Exception e) {
       logger.error("Error saving registered executors", e);
     }
-    executors.put(fullId, executorInfo);
+    logger.info("oldExecutorShuffleInfo: {}",executorInfo.toString());
+    try {
+      ExternalShuffleDiskBlockManager externalShuffleDiskBlockManager = new ExternalShuffleDiskBlockManager();
+      ExecutorShuffleInfo newShuffleInfo = new ExecutorShuffleInfo(
+              externalShuffleDiskBlockManager.localDirs(),
+              externalShuffleDiskBlockManager.subDirsPerLocalDir(),
+              executorInfo.shuffleManager,
+              executorInfo.shuffleCompressEnabled,
+              executorInfo.compressionCodec,
+              executorInfo.serializer,
+              executorInfo.shuffleUnsafeFastMergeEnabled,
+              executorInfo.fileTransferTo);
+
+      logger.info("newExecutorShuffleInfo: {}",newShuffleInfo.toString());
+      executors.put(fullId, newShuffleInfo);
+    } catch (Exception e) {
+      e.printStackTrace();
+    }
   }
 
   /**
