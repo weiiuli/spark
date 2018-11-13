@@ -88,12 +88,29 @@ private[spark] class ExternalShuffleDiskBlockManager() extends Logging {
         dir = new File(root, namePrefix + "-" + UUID.randomUUID.toString)
         if (dir.exists() || !dir.mkdirs()) {
           dir = null
-        }
-        // Here create subDirs  directory inside dir
-        for (su <- subDirsPerLocalDir) {
-          sudir = new File(dir, Integer.toString(su & 0xff | 0x100, 16).substring(1))
-          if (sudir.exists() || !sudir.mkdirs()) {
+        } else {
+          // Here create subDirs  directory inside dir
+          var sudiraAtempts = 0
+          var sudir: File = null
+          for (su <- 0 to subDirsPerLocalDir) {
+            sudiraAtempts = 0
             sudir = null
+            while (sudir == null) {
+              sudiraAtempts += 1
+              if (sudiraAtempts > maxAttempts) {
+                throw new IOException("Failed to create a temp directory (under " + su.toString + ") after " +
+                  maxAttempts + " attempts!")
+              }
+              try {
+                sudir = new File(dir, Integer.toString(su & 0xff | 0x100, 16).substring(1))
+                if (sudir.exists() || !sudir.mkdirs()) {
+                  sudir = null
+                }
+              }
+              catch {
+                case e: SecurityException => sudir = null;
+              }
+            }
           }
         }
       } catch {
