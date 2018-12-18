@@ -115,7 +115,8 @@ class ExternalShuffleServiceDbSuite extends ShuffleSuite with BeforeAndAfterAll 
     externalShuffleService.start()
     bockHandler = externalShuffleService.getBlockHandler
     blockResolver = bockHandler.getBlockResolver
-    val error = intercept[SparkException] {
+
+    val error = intercept[RuntimeException] {
       val block0Stream = blockResolver.getBlockData("app0", "exec0", 0, 0, 0).createInputStream
       val block0 = CharStreams.toString(new InputStreamReader(block0Stream, StandardCharsets.UTF_8))
       block0Stream.close()
