@@ -21,10 +21,9 @@ import java.io._
 import java.nio.charset.StandardCharsets
 
 import com.google.common.io.{CharStreams, Closeables, Files}
-import org.junit.Assert.{assertEquals, assertTrue}
 import org.scalatest.BeforeAndAfterAll
 
-import org.apache.spark.{SecurityManager, ShuffleSuite, SparkConf}
+import org.apache.spark.{SecurityManager, ShuffleSuite, SparkConf, SparkException}
 import org.apache.spark.network.shuffle.{ExternalShuffleBlockHandler, ExternalShuffleBlockResolver}
 import org.apache.spark.network.shuffle.protocol.ExecutorShuffleInfo
 import org.apache.spark.network.util.JavaUtils
@@ -96,20 +95,16 @@ class ExternalShuffleServiceDbSuite extends ShuffleSuite with BeforeAndAfterAll 
     externalShuffleService.start()
     bockHandler = externalShuffleService.getBlockHandler
     blockResolver = bockHandler.getBlockResolver
-    try {
-      val block0Stream = blockResolver.getBlockData("app0", "exec0", 0, 0, 0).createInputStream
-      val block0 = CharStreams.toString(new InputStreamReader(block0Stream, StandardCharsets.UTF_8))
-      block0Stream.close()
-      assertEquals(sortBlock0, block0)
-    } catch {
-      case e: RuntimeException =>
 
-      // pass
-    } finally {
-      blockResolver.closeForTest()
-      // externalShuffleService stop
-      externalShuffleService.stop()
-    }
+    val block0Stream = blockResolver.getBlockData("app0", "exec0", 0, 0, 0).createInputStream
+    val block0 = CharStreams.toString(new InputStreamReader(block0Stream, StandardCharsets.UTF_8))
+    block0Stream.close()
+    assert(sortBlock0 == block0)
+    // pass
+    blockResolver.closeForTest()
+    // externalShuffleService stop
+    externalShuffleService.stop()
+
   }
 
   // This test getBlockData will't be passed when the external shuffle service is restarted.
@@ -120,20 +115,17 @@ class ExternalShuffleServiceDbSuite extends ShuffleSuite with BeforeAndAfterAll 
     externalShuffleService.start()
     bockHandler = externalShuffleService.getBlockHandler
     blockResolver = bockHandler.getBlockResolver
-    try {
+    val error = intercept[SparkException] {
       val block0Stream = blockResolver.getBlockData("app0", "exec0", 0, 0, 0).createInputStream
       val block0 = CharStreams.toString(new InputStreamReader(block0Stream, StandardCharsets.UTF_8))
       block0Stream.close()
-      assertEquals(sortBlock0, block0)
-      fail("Should have failed")
-    } catch {
-      case e: RuntimeException =>
-        assertTrue("Bad error message: " + e, e.getMessage.contains("not registered"))
-    } finally {
-      blockResolver.closeForTest()
-      // externalShuffleService stop
-      externalShuffleService.stop()
-    }
+      assert(sortBlock0 == block0)
+    }.getMessage
+
+    assert(error.contains("not registered"))
+    blockResolver.closeForTest()
+    // externalShuffleService stop
+    externalShuffleService.stop()
   }
 
   /**
