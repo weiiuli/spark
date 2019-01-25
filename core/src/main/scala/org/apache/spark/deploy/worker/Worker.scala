@@ -462,20 +462,20 @@ private[deploy] class Worker(
           // when cleaning up
           val appIdFromDir = dir.getName
           val isAppStillRunning = appIds.contains(appIdFromDir)
+          dir.isDirectory && !isAppStillRunning &&
+          !Utils.doesDirectoryContainAnyNewFiles(dir, APP_DATA_RETENTION_SECONDS)
+        }.foreach { dir =>
+          logInfo(s"Removing directory: ${dir.getPath}")
+          Utils.deleteRecursively(dir)
 
           // Remove some registeredExecutors information of DB in external shuffle service when
           // #spark.shuffle.service.db.enabled=true, the one which comes to mind is, what happens
           // if an application is stopped while the external shuffle service is down?
           // So then it'll leave an entry in the DB and the entry should be removed.
           if (conf.get(config.SHUFFLE_SERVICE_DB_ENABLED) &&
-            conf.get(config.SHUFFLE_SERVICE_ENABLED) && !isAppStillRunning) {
-            shuffleService.applicationRemoved(appIdFromDir)
+            conf.get(config.SHUFFLE_SERVICE_ENABLED)) {
+            shuffleService.applicationRemoved(dir.getName)
           }
-          dir.isDirectory && !isAppStillRunning &&
-          !Utils.doesDirectoryContainAnyNewFiles(dir, APP_DATA_RETENTION_SECONDS)
-        }.foreach { dir =>
-          logInfo(s"Removing directory: ${dir.getPath}")
-          Utils.deleteRecursively(dir)
         }
       }(cleanupThreadExecutor)
 
